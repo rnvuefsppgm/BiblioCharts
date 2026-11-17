@@ -1,0 +1,11 @@
+# dados de pesquisa e saídas locais
+*.xlsx
+*.xls
+*.csv
+*.bib
+*.ris
+*.nbib
+*.zip
+!docs/**
+.DS_Store
+Thumbs.db

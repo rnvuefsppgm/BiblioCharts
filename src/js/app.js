@@ -1,0 +1,4768 @@
+// ══════════════════════════════════════════════════════════════
+// C2S — Canvas 2D → SVG Context (full Chart.js compatible)
+// Architecture: save()/restore() maps to nested SVG <g> elements.
+// Each save() creates a new child <g>; restore() returns to parent.
+// This correctly handles Chart.js's transform stack.
+// ══════════════════════════════════════════════════════════════
+class C2S {
+  constructor(W, H){
+    const ns='http://www.w3.org/2000/svg';
+    this._ns=ns;
+    this.width=W; this.height=H;
+    // Root SVG
+    this._svg=document.createElementNS(ns,'svg');
+    this._svg.setAttribute('xmlns',ns);
+    this._svg.setAttribute('xmlns:xlink','http://www.w3.org/1999/xlink');
+    this._svg.setAttribute('width',W); this._svg.setAttribute('height',H);
+    this._svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+    // Defs for gradients & clips
+    this._defs=document.createElementNS(ns,'defs');
+    this._svg.appendChild(this._defs);
+    // White bg
+    const bg=document.createElementNS(ns,'rect');
+    bg.setAttribute('width',W); bg.setAttribute('height',H); bg.setAttribute('fill','white');
+    this._svg.appendChild(bg);
+    // Root drawing group
+    this._root=document.createElementNS(ns,'g');
+    this._svg.appendChild(this._root);
+    // Current group = where new elements get appended
+    this._cur=this._root;
+    // State
+    this._st={
+      fillStyle:'black', strokeStyle:'black', lineWidth:1,
+      font:'12px sans-serif', textAlign:'left', textBaseline:'alphabetic',
+      globalAlpha:1, lineDash:[], lineCap:'butt', lineJoin:'miter',
+      clip:null
+    };
+    // Stack of {group, state} pairs
+    this._stack=[];
+    // Current path commands
+    this._path=[];
+    // Counters
+    this._nc=0;
+    // Transform: we track the CTM separately so save/restore work correctly
+    // The actual transform is applied via nested <g transform="..."> on save/translate/scale/rotate
+    this._pendingTransform=null; // set when transform changes, applied on next save or draw
+    this._txStack=[]; // stack of {a,b,c,d,e,f}
+    this._tx={a:1,b:0,c:0,d:1,e:0,f:0}; // current CTM (for reference only)
+  }
+
+  // ─── Internal helpers ───
+  _n(tag){return document.createElementNS(this._ns,tag);}
+
+  _uid(){return 'c2s'+(++this._nc);}
+
+  // Parse color string → {color, opacity}
+  _col(s, baseAlpha){
+    const a=baseAlpha??this._st.globalAlpha;
+    if(!s||s==='transparent')return{color:'none',opacity:0};
+    if(typeof s==='object'&&s._id)return{color:`url(#${s._id})`,opacity:a};
+    const rgba=s.match(/rgba?\(([^)]+)\)/);
+    if(rgba){
+      const p=rgba[1].split(',').map(v=>parseFloat(v.trim()));
+      const alpha=(p[3]??1)*a;
+      return{color:`rgb(${Math.round(p[0])},${Math.round(p[1])},${Math.round(p[2])})`,opacity:alpha};
+    }
+    return{color:s,opacity:a};
+  }
+
+  // Apply fill/stroke attributes to element
+  _sty(el, doFill, doStroke){
+    const s=this._st;
+    if(doFill){
+      const c=this._col(s.fillStyle);
+      el.setAttribute('fill',c.color);
+      if(c.opacity<0.999)el.setAttribute('fill-opacity',c.opacity.toFixed(4));
+    } else el.setAttribute('fill','none');
+    if(doStroke){
+      const c=this._col(s.strokeStyle);
+      el.setAttribute('stroke',c.color);
+      el.setAttribute('stroke-width',s.lineWidth);
+      if(c.opacity<0.999)el.setAttribute('stroke-opacity',c.opacity.toFixed(4));
+      if(s.lineDash&&s.lineDash.length)el.setAttribute('stroke-dasharray',s.lineDash.join(','));
+      if(s.lineCap!=='butt')el.setAttribute('stroke-linecap',s.lineCap);
+      if(s.lineJoin!=='miter')el.setAttribute('stroke-linejoin',s.lineJoin);
+    } else el.setAttribute('stroke','none');
+    if(s.clip)el.setAttribute('clip-path',`url(#${s.clip})`);
+    return el;
+  }
+
+  // Append element to current group
+  _add(el){this._cur.appendChild(el); return el;}
+
+  // ─── Transform ───
+  save(){
+    // Snapshot current state
+    const snapState={...this._st, lineDash:[...this._st.lineDash]};
+    const snapTx={...this._tx};
+    // Push new <g> onto the group stack so transforms nest correctly
+    const g=this._n('g');
+    this._cur.appendChild(g);
+    this._stack.push({group:this._cur, state:snapState, tx:snapTx});
+    this._cur=g;
+  }
+
+  restore(){
+    if(!this._stack.length)return;
+    const prev=this._stack.pop();
+    this._cur=prev.group;
+    this._st=prev.state;
+    this._tx=prev.tx;
+  }
+
+  // Apply transform to current group
+  _applyTx(a,b,c,d,e,f){
+    const g=this._n('g');
+    g.setAttribute('transform',`matrix(${a} ${b} ${c} ${d} ${e} ${f})`);
+    this._cur.appendChild(g);
+    this._cur=g;
+    // Update CTM
+    const t=this._tx;
+    this._tx={
+      a:t.a*a+t.c*b, b:t.b*a+t.d*b,
+      c:t.a*c+t.c*d, d:t.b*c+t.d*d,
+      e:t.a*e+t.c*f+t.e, f:t.b*e+t.d*f+t.f
+    };
+  }
+
+  translate(x,y){if(x!==0||y!==0)this._applyTx(1,0,0,1,x,y);}
+  scale(sx,sy){if(sx!==1||sy!==1)this._applyTx(sx,0,0,sy,0,0);}
+  rotate(a){if(a!==0){const c=Math.cos(a),s=Math.sin(a);this._applyTx(c,s,-s,c,0,0);}}
+  transform(a,b,c,d,e,f){this._applyTx(a,b,c,d,e,f);}
+  setTransform(a,b,c,d,e,f){
+    // Reset to identity then apply
+    this._tx={a:1,b:0,c:0,d:1,e:0,f:0};
+    // We can't truly "reset" SVG transforms without knowing root, so just apply directly
+    const g=this._n('g');
+    g.setAttribute('transform',`matrix(${a} ${b} ${c} ${d} ${e} ${f})`);
+    this._cur.appendChild(g);
+    this._cur=g;
+    this._tx={a,b,c,d,e,f};
+  }
+  resetTransform(){this.setTransform(1,0,0,1,0,0);}
+  getTransform(){return{...this._tx};}
+
+  // ─── Path ───
+  beginPath(){this._path=[];}
+  closePath(){this._path.push('Z');}
+  moveTo(x,y){this._path.push(`M${+x.toFixed(3)} ${+y.toFixed(3)}`);}
+  lineTo(x,y){this._path.push(`L${+x.toFixed(3)} ${+y.toFixed(3)}`);}
+  bezierCurveTo(c1x,c1y,c2x,c2y,x,y){
+    this._path.push(`C${+c1x.toFixed(3)} ${+c1y.toFixed(3)} ${+c2x.toFixed(3)} ${+c2y.toFixed(3)} ${+x.toFixed(3)} ${+y.toFixed(3)}`);
+  }
+  quadraticCurveTo(cpx,cpy,x,y){
+    this._path.push(`Q${+cpx.toFixed(3)} ${+cpy.toFixed(3)} ${+x.toFixed(3)} ${+y.toFixed(3)}`);
+  }
+  arc(cx,cy,r,sa,ea,ccw=false){
+    if(r<0.001)return;
+    const span=Math.abs(ea-sa);
+    if(span>=2*Math.PI-0.0001){
+      // Full circle via two arcs
+      this._path.push(`M${+(cx+r).toFixed(3)} ${+cy.toFixed(3)}`);
+      this._path.push(`A${+r.toFixed(3)} ${+r.toFixed(3)} 0 1 0 ${+(cx-r).toFixed(3)} ${+cy.toFixed(3)}`);
+      this._path.push(`A${+r.toFixed(3)} ${+r.toFixed(3)} 0 1 0 ${+(cx+r).toFixed(3)} ${+cy.toFixed(3)}`);
+      return;
+    }
+    const x1=cx+r*Math.cos(sa), y1=cy+r*Math.sin(sa);
+    const x2=cx+r*Math.cos(ea), y2=cy+r*Math.sin(ea);
+    let ang=ccw ? sa-ea : ea-sa;
+    if(ang<0)ang+=2*Math.PI;
+    const large=ang>Math.PI ? 1 : 0;
+    const sweep=ccw ? 0 : 1;
+    this._path.push(`M${+x1.toFixed(3)} ${+y1.toFixed(3)}`);
+    this._path.push(`A${+r.toFixed(3)} ${+r.toFixed(3)} 0 ${large} ${sweep} ${+x2.toFixed(3)} ${+y2.toFixed(3)}`);
+  }
+  arcTo(x1,y1,x2,y2,r){this.lineTo(x1,y1);}
+  rect(x,y,w,h){this._path.push(`M${+x.toFixed(3)} ${+y.toFixed(3)} h${+w.toFixed(3)} v${+h.toFixed(3)} h${+(-w).toFixed(3)} Z`);}
+  roundRect(x,y,w,h,rad=0){
+    const r=Array.isArray(rad)?rad[0]:rad;
+    if(!r){this.rect(x,y,w,h);return;}
+    const rr=Math.min(r,w/2,h/2);
+    this._path.push(`M${+(x+rr).toFixed(3)} ${+y.toFixed(3)} H${+(x+w-rr).toFixed(3)} Q${+(x+w).toFixed(3)} ${+y.toFixed(3)} ${+(x+w).toFixed(3)} ${+(y+rr).toFixed(3)} V${+(y+h-rr).toFixed(3)} Q${+(x+w).toFixed(3)} ${+(y+h).toFixed(3)} ${+(x+w-rr).toFixed(3)} ${+(y+h).toFixed(3)} H${+(x+rr).toFixed(3)} Q${+x.toFixed(3)} ${+(y+h).toFixed(3)} ${+x.toFixed(3)} ${+(y+h-rr).toFixed(3)} V${+(y+rr).toFixed(3)} Q${+x.toFixed(3)} ${+y.toFixed(3)} ${+(x+rr).toFixed(3)} ${+y.toFixed(3)} Z`);
+  }
+
+  _commitPath(doFill, doStroke){
+    if(!this._path.length)return;
+    const p=this._n('path');
+    p.setAttribute('d',this._path.join(' '));
+    this._sty(p, doFill, doStroke);
+    this._add(p);
+  }
+  fill(rule){
+    if(this._path.length){
+      const p=this._n('path');
+      p.setAttribute('d',this._path.join(' '));
+      if(rule==='evenodd')p.setAttribute('fill-rule','evenodd');
+      const c=this._col(this._st.fillStyle);
+      p.setAttribute('fill',c.color);
+      if(c.opacity<0.999)p.setAttribute('fill-opacity',c.opacity.toFixed(4));
+      p.setAttribute('stroke','none');
+      if(this._st.clip)p.setAttribute('clip-path',`url(#${this._st.clip})`);
+      this._add(p);
+    }
+  }
+  stroke(){
+    if(this._path.length){
+      const p=this._n('path');
+      p.setAttribute('d',this._path.join(' '));
+      p.setAttribute('fill','none');
+      const c=this._col(this._st.strokeStyle);
+      p.setAttribute('stroke',c.color);
+      p.setAttribute('stroke-width',this._st.lineWidth);
+      if(c.opacity<0.999)p.setAttribute('stroke-opacity',c.opacity.toFixed(4));
+      if(this._st.lineDash&&this._st.lineDash.length)p.setAttribute('stroke-dasharray',this._st.lineDash.join(','));
+      if(this._st.lineCap!=='butt')p.setAttribute('stroke-linecap',this._st.lineCap);
+      if(this._st.lineJoin!=='miter')p.setAttribute('stroke-linejoin',this._st.lineJoin);
+      if(this._st.clip)p.setAttribute('clip-path',`url(#${this._st.clip})`);
+      this._add(p);
+    }
+  }
+
+  clip(){
+    const id=this._uid();
+    const cp=this._n('clipPath');
+    cp.setAttribute('id',id);
+    if(this._path.length){
+      const pp=this._n('path');
+      pp.setAttribute('d',this._path.join(' '));
+      cp.appendChild(pp);
+    }
+    this._defs.appendChild(cp);
+    // Create a new group with this clip
+    const g=this._n('g');
+    g.setAttribute('clip-path',`url(#${id})`);
+    this._cur.appendChild(g);
+    this._cur=g;
+    this._st={...this._st,clip:null}; // clip is via group, reset individual
+  }
+
+  // ─── Rectangles ───
+  fillRect(x,y,w,h){
+    const el=this._n('rect');
+    el.setAttribute('x',+x.toFixed(3)); el.setAttribute('y',+y.toFixed(3));
+    el.setAttribute('width',+w.toFixed(3)); el.setAttribute('height',+h.toFixed(3));
+    const c=this._col(this._st.fillStyle);
+    el.setAttribute('fill',c.color);
+    if(c.opacity<0.999)el.setAttribute('fill-opacity',c.opacity.toFixed(4));
+    el.setAttribute('stroke','none');
+    if(this._st.clip)el.setAttribute('clip-path',`url(#${this._st.clip})`);
+    this._add(el);
+  }
+  strokeRect(x,y,w,h){
+    const el=this._n('rect');
+    el.setAttribute('x',+x.toFixed(3)); el.setAttribute('y',+y.toFixed(3));
+    el.setAttribute('width',+w.toFixed(3)); el.setAttribute('height',+h.toFixed(3));
+    el.setAttribute('fill','none');
+    const c=this._col(this._st.strokeStyle);
+    el.setAttribute('stroke',c.color);
+    el.setAttribute('stroke-width',this._st.lineWidth);
+    this._add(el);
+  }
+  clearRect(x,y,w,h){
+    const el=this._n('rect');
+    el.setAttribute('x',+x.toFixed(3)); el.setAttribute('y',+y.toFixed(3));
+    el.setAttribute('width',+w.toFixed(3)); el.setAttribute('height',+h.toFixed(3));
+    el.setAttribute('fill','white'); el.setAttribute('stroke','none');
+    this._add(el);
+  }
+
+  // ─── Text ───
+  fillText(txt,x,y){
+    if(txt===null||txt===undefined||txt==='')return;
+    const el=this._n('text');
+    const fsize=this._fontSize();
+    let dy=0;
+    const base=this._st.textBaseline;
+    if(base==='middle')dy=fsize*0.35;
+    else if(base==='top'||base==='hanging')dy=fsize*0.75;
+    else if(base==='bottom'||base==='ideographic')dy=-fsize*0.1;
+    el.setAttribute('x',+x.toFixed(3));
+    el.setAttribute('y',+(y+dy).toFixed(3));
+    const anch={left:'start',start:'start',center:'middle',right:'end',end:'end'};
+    el.setAttribute('text-anchor',anch[this._st.textAlign]||'start');
+    el.setAttribute('font-family',this._fontFamily());
+    el.setAttribute('font-size',fsize);
+    const fw=this._fontWeight();
+    if(fw!=='normal')el.setAttribute('font-weight',fw);
+    const fi=this._fontStyle();
+    if(fi!=='normal')el.setAttribute('font-style',fi);
+    const c=this._col(this._st.fillStyle);
+    el.setAttribute('fill',c.color);
+    if(c.opacity<0.999)el.setAttribute('fill-opacity',c.opacity.toFixed(4));
+    if(this._st.clip)el.setAttribute('clip-path',`url(#${this._st.clip})`);
+    el.textContent=String(txt);
+    this._add(el);
+  }
+  strokeText(txt,x,y){this.fillText(txt,x,y);}
+  measureText(txt){
+    const fw=this._fontSize();
+    // Reasonably accurate approximation per character
+    const mono=/\d/.test(String(txt).slice(0,3));
+    return {width:String(txt).length*fw*(mono?0.62:0.58)};
+  }
+  _fontSize(){const m=this._st.font.match(/(\d+(?:\.\d+)?)(px|pt)/);return m?parseFloat(m[1]):12;}
+  _fontFamily(){const m=this._st.font.match(/(?:px|pt)\s+(.+)$/);return m?m[1]:'sans-serif';}
+  _fontWeight(){return /\bbold\b/i.test(this._st.font)?'bold':'normal';}
+  _fontStyle(){return /\bitalic\b/i.test(this._st.font)?'italic':'normal';}
+
+  // ─── Gradients ───
+  createLinearGradient(x0,y0,x1,y1){
+    const id=this._uid();
+    const lg=this._n('linearGradient');
+    lg.setAttribute('id',id);
+    lg.setAttribute('x1',x0); lg.setAttribute('y1',y0);
+    lg.setAttribute('x2',x1); lg.setAttribute('y2',y1);
+    lg.setAttribute('gradientUnits','userSpaceOnUse');
+    this._defs.appendChild(lg);
+    return{_id:id,_el:lg,addColorStop:(off,col)=>{
+      const s=this._n('stop');
+      s.setAttribute('offset',off);
+      const rgba=col.match(/rgba?\(([^)]+)\)/);
+      if(rgba){
+        const p=rgba[1].split(',').map(v=>parseFloat(v.trim()));
+        s.setAttribute('stop-color',`rgb(${Math.round(p[0])},${Math.round(p[1])},${Math.round(p[2])})`);
+        if(p[3]!=null&&p[3]<1)s.setAttribute('stop-opacity',p[3].toFixed(4));
+      } else s.setAttribute('stop-color',col);
+      lg.appendChild(s);
+    }};
+  }
+  createRadialGradient(x0,y0,r0,x1,y1,r1){
+    const id=this._uid();
+    const rg=this._n('radialGradient');
+    rg.setAttribute('id',id);
+    rg.setAttribute('cx',x1); rg.setAttribute('cy',y1); rg.setAttribute('r',r1);
+    rg.setAttribute('fx',x0); rg.setAttribute('fy',y0);
+    rg.setAttribute('gradientUnits','userSpaceOnUse');
+    this._defs.appendChild(rg);
+    return{_id:id,_el:rg,addColorStop:(off,col)=>{
+      const s=this._n('stop');s.setAttribute('offset',off);s.setAttribute('stop-color',col);rg.appendChild(s);
+    }};
+  }
+  createPattern(){return{_id:null};}
+
+  // ─── Images ───
+  drawImage(img,...args){
+    // Only handle canvas/image elements
+    if(!img)return;
+    const el=this._n('image');
+    if(img instanceof HTMLCanvasElement){
+      el.setAttribute('href',img.toDataURL('image/png',0.95));
+    } else if(img instanceof HTMLImageElement){
+      el.setAttribute('href',img.src);
+    } else return;
+    const [sx,sy,sw,sh,dx,dy,dw,dh]=args;
+    if(args.length>=8){
+      el.setAttribute('x',+dx.toFixed(3)); el.setAttribute('y',+dy.toFixed(3));
+      el.setAttribute('width',+dw.toFixed(3)); el.setAttribute('height',+dh.toFixed(3));
+    } else if(args.length>=4){
+      el.setAttribute('x',+sx.toFixed(3)); el.setAttribute('y',+sy.toFixed(3));
+      el.setAttribute('width',+sw.toFixed(3)); el.setAttribute('height',+sh.toFixed(3));
+    } else {
+      el.setAttribute('x',+(sx||0).toFixed(3)); el.setAttribute('y',+(sy||0).toFixed(3));
+      el.setAttribute('width',img.width||100); el.setAttribute('height',img.height||100);
+    }
+    this._add(el);
+  }
+
+  // ─── Misc ───
+  setLineDash(d){this._st.lineDash=Array.isArray(d)?[...d]:[];}
+  getLineDash(){return this._st.lineDash||[];}
+  isPointInPath(){return false;}
+  isPointInStroke(){return false;}
+
+  // ─── Properties ───
+  get fillStyle(){return this._st.fillStyle;}
+  set fillStyle(v){if(v!=null)this._st.fillStyle=v;}
+  get strokeStyle(){return this._st.strokeStyle;}
+  set strokeStyle(v){if(v!=null)this._st.strokeStyle=v;}
+  get lineWidth(){return this._st.lineWidth;}
+  set lineWidth(v){this._st.lineWidth=v;}
+  get font(){return this._st.font;}
+  set font(v){this._st.font=v;}
+  get textAlign(){return this._st.textAlign;}
+  set textAlign(v){this._st.textAlign=v;}
+  get textBaseline(){return this._st.textBaseline;}
+  set textBaseline(v){this._st.textBaseline=v;}
+  get globalAlpha(){return this._st.globalAlpha;}
+  set globalAlpha(v){this._st.globalAlpha=typeof v==='number'?Math.max(0,Math.min(1,v)):1;}
+  get lineCap(){return this._st.lineCap;}
+  set lineCap(v){this._st.lineCap=v;}
+  get lineJoin(){return this._st.lineJoin;}
+  set lineJoin(v){this._st.lineJoin=v;}
+  get globalCompositeOperation(){return 'source-over';}
+  set globalCompositeOperation(v){}
+  get imageSmoothingEnabled(){return true;}
+  set imageSmoothingEnabled(v){}
+  get shadowBlur(){return 0;} set shadowBlur(v){}
+  get shadowColor(){return 'transparent';} set shadowColor(v){}
+  get shadowOffsetX(){return 0;} set shadowOffsetX(v){}
+  get shadowOffsetY(){return 0;} set shadowOffsetY(v){}
+  get miterLimit(){return 10;} set miterLimit(v){}
+  get lineDashOffset(){return 0;} set lineDashOffset(v){}
+
+  // ─── Output ───
+  getSVG(){return this._svg;}
+  getSVGString(){return new XMLSerializer().serializeToString(this._svg);}
+}
+
+// ══════════════════════════════════════════════════════════════
+// SVG CHART RENDERER
+// Reads Chart.js computed data and layout to produce SVG
+// without calling chart.draw() — avoids DPR/transform issues
+// ══════════════════════════════════════════════════════════════
+
+function appendLegendSVG(svgEl, specs, chartH, totalW, fs){
+  if(!specs||!specs.length)return;
+  const ns='http://www.w3.org/2000/svg';
+  const BAR_W=88, BAR_H=11, PAD=10, LINE_W=22, BOX=11;
+  // separator
+  const sep=document.createElementNS(ns,'line');
+  sep.setAttribute('x1',10);sep.setAttribute('y1',chartH+5);
+  sep.setAttribute('x2',totalW-10);sep.setAttribute('y2',chartH+5);
+  sep.setAttribute('stroke','rgba(0,0,0,0.1)');sep.setAttribute('stroke-width',0.8);
+  svgEl.appendChild(sep);
+  let lx=14, ly=chartH+13;
+  const fsize=Math.max(9,fs-2);
+  specs.forEach(spec=>{
+    if(spec.grad){
+      const gid='lg'+Math.random().toString(36).slice(2,8);
+      let defs=svgEl.querySelector('defs');
+      if(!defs){defs=document.createElementNS(ns,'defs');svgEl.insertBefore(defs,svgEl.firstChild);}
+      const lg=document.createElementNS(ns,'linearGradient');
+      lg.setAttribute('id',gid);lg.setAttribute('x1','0%');lg.setAttribute('y1','0%');lg.setAttribute('x2','100%');lg.setAttribute('y2','0%');
+      const s1=document.createElementNS(ns,'stop');s1.setAttribute('offset','0%');s1.setAttribute('stop-color',spec.grad[0]);
+      const s2=document.createElementNS(ns,'stop');s2.setAttribute('offset','100%');s2.setAttribute('stop-color',spec.grad[1]);
+      lg.appendChild(s1);lg.appendChild(s2);defs.appendChild(lg);
+      const r=document.createElementNS(ns,'rect');
+      r.setAttribute('x',lx);r.setAttribute('y',ly);r.setAttribute('width',BAR_W);r.setAttribute('height',BAR_H);
+      r.setAttribute('fill',`url(#${gid})`);r.setAttribute('rx',3);
+      r.setAttribute('stroke','rgba(0,0,0,0.15)');r.setAttribute('stroke-width',0.5);
+      svgEl.appendChild(r);lx+=BAR_W+5;
+    } else if(spec.line){
+      const l=document.createElementNS(ns,'line');
+      l.setAttribute('x1',lx);l.setAttribute('y1',ly+BAR_H/2);l.setAttribute('x2',lx+LINE_W);l.setAttribute('y2',ly+BAR_H/2);
+      l.setAttribute('stroke',spec.line);l.setAttribute('stroke-width',3);svgEl.appendChild(l);
+      const dot=document.createElementNS(ns,'circle');
+      dot.setAttribute('cx',lx+LINE_W/2);dot.setAttribute('cy',ly+BAR_H/2);dot.setAttribute('r',3.5);
+      dot.setAttribute('fill',spec.line);svgEl.appendChild(dot);
+      lx+=LINE_W+5;
+    } else if(spec.circles){
+      [5,8,12].forEach((r,i)=>{
+        const c=document.createElementNS(ns,'circle');
+        c.setAttribute('cx',lx+r);c.setAttribute('cy',ly+BAR_H/2);c.setAttribute('r',r);
+        c.setAttribute('fill',spec.circles[i]||'#888');c.setAttribute('stroke','none');
+        svgEl.appendChild(c);lx+=r*2+3;
+      });
+      lx+=5;
+    } else if(spec.colored_boxes){
+      (spec.colored_boxes||[]).forEach((col,i)=>{
+        const bx=document.createElementNS(ns,'rect');
+        bx.setAttribute('x',lx);bx.setAttribute('y',ly+(BAR_H-BOX)/2);bx.setAttribute('width',BOX);bx.setAttribute('height',BOX);
+        bx.setAttribute('fill',col);svgEl.appendChild(bx);lx+=BOX+2;
+        const lb=spec.box_labels?spec.box_labels[i]:'';
+        const t=document.createElementNS(ns,'text');
+        t.setAttribute('x',lx);t.setAttribute('y',ly+BAR_H/2+fsize*0.35);
+        t.setAttribute('font-size',fsize);t.setAttribute('font-family','Inter,Arial,sans-serif');
+        t.setAttribute('fill','#43474f');t.textContent=lb;svgEl.appendChild(t);
+        lx+=lb.length*fsize*0.6+PAD;
+      });
+      return;
+    }
+    if(spec.label){
+      const t=document.createElementNS(ns,'text');
+      t.setAttribute('x',lx);t.setAttribute('y',ly+BAR_H/2+fsize*0.35);
+      t.setAttribute('font-size',fsize);t.setAttribute('font-family','Inter,Arial,sans-serif');
+      t.setAttribute('fill','#43474f');t.textContent=spec.label;
+      svgEl.appendChild(t);lx+=spec.label.length*fsize*0.62+PAD*2;
+    }
+  });
+}
+
+// Parse rgba/rgb/hex → {r,g,b,a}
+function parseColor(s){
+  if(!s||s==='none')return null;
+  const m=s.match(/rgba?\(([^)]+)\)/);
+  if(m){const p=m[1].split(',').map(v=>parseFloat(v.trim()));return{r:Math.round(p[0]),g:Math.round(p[1]),b:Math.round(p[2]),a:p[3]??1};}
+  return null;
+}
+function colorStr(c){
+  if(!c)return'none';
+  if(typeof c==='string')return c;
+  if(c.a!=null&&c.a<1)return`rgba(${c.r},${c.g},${c.b},${c.a})`;
+  return`rgb(${c.r},${c.g},${c.b})`;
+}
+
+// Main chart→SVG converter: reads Chart.js computed state directly
+function chartToSVGDirect(chartInst, W, H){
+  const ns='http://www.w3.org/2000/svg';
+  const svg=document.createElementNS(ns,'svg');
+  svg.setAttribute('xmlns',ns);
+  svg.setAttribute('xmlns:xlink','http://www.w3.org/1999/xlink');
+  svg.setAttribute('width',W);svg.setAttribute('height',H);
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  const defs=document.createElementNS(ns,'defs');svg.appendChild(defs);
+
+  // White background
+  const bg=document.createElementNS(ns,'rect');
+  bg.setAttribute('width',W);bg.setAttribute('height',H);bg.setAttribute('fill','white');svg.appendChild(bg);
+
+  function el(tag){return document.createElementNS(ns,tag);}
+  function addText(parent,txt,x,y,opts={}){
+    const t=el('text');t.textContent=String(txt);
+    t.setAttribute('x',x);t.setAttribute('y',y);
+    t.setAttribute('font-family',opts.family||'Inter,Arial,sans-serif');
+    t.setAttribute('font-size',opts.size||12);
+    t.setAttribute('fill',opts.fill||'#333');
+    if(opts.anchor)t.setAttribute('text-anchor',opts.anchor);
+    if(opts.weight)t.setAttribute('font-weight',opts.weight);
+    if(opts.clip)t.setAttribute('clip-path',`url(#${opts.clip})`);
+    parent.appendChild(t);return t;
+  }
+
+  // Get chart area and scales
+  const ca=chartInst.chartArea;
+  if(!ca)return svg;
+  const {left:cL,right:cR,top:cT,bottom:cB}=ca;
+  const cW=cR-cL, cH=cB-cT;
+  const dpr=window.devicePixelRatio||1;
+  // Chart.js stores pixel values scaled by DPR on retina screens
+  // but chartArea values are in CSS pixels already
+  // The canvas.width = CSS_width * dpr, so we need to normalize
+  const canvasEl=chartInst.canvas;
+  const cssW=canvasEl.offsetWidth||W;
+  const cssH=canvasEl.offsetHeight||H;
+  const scaleX=W/cssW;
+  const scaleY=H/cssH;
+
+  // Clip rect for chart area
+  const clipId='ca'+Math.random().toString(36).slice(2,7);
+  const cp=el('clipPath');cp.setAttribute('id',clipId);
+  const cr=el('rect');
+  cr.setAttribute('x',cL*scaleX);cr.setAttribute('y',cT*scaleY);
+  cr.setAttribute('width',cW*scaleX);cr.setAttribute('height',cH*scaleY);
+  cp.appendChild(cr);defs.appendChild(cp);
+
+  // Chart area background
+  const cab=el('rect');
+  cab.setAttribute('x',cL*scaleX);cab.setAttribute('y',cT*scaleY);
+  cab.setAttribute('width',cW*scaleX);cab.setAttribute('height',cH*scaleY);
+  cab.setAttribute('fill','white');svg.appendChild(cab);
+
+  const opts=chartInst.options||{};
+  const fs=(opts.font?.size||12)*scaleX;
+
+  // ── Draw grid lines ──
+  const scales=chartInst.scales||{};
+  Object.values(scales).forEach(scale=>{
+    if(!scale.ticks)return;
+    const isX=scale.axis==='x';
+    scale.ticks.forEach((tick,i)=>{
+      const px=scale.getPixelForTick(i);
+      if(px==null||isNaN(px))return;
+      const line=el('line');
+      line.setAttribute('stroke','rgba(0,0,0,0.06)');line.setAttribute('stroke-width',1);
+      if(isX){
+        line.setAttribute('x1',px*scaleX);line.setAttribute('y1',cT*scaleY);
+        line.setAttribute('x2',px*scaleX);line.setAttribute('y2',cB*scaleY);
+      } else {
+        line.setAttribute('x1',cL*scaleX);line.setAttribute('y1',px*scaleY);
+        line.setAttribute('x2',cR*scaleX);line.setAttribute('y2',px*scaleY);
+      }
+      svg.appendChild(line);
+    });
+  });
+
+  // ── Draw datasets ──
+  const metas=chartInst._metasets||[];
+  metas.forEach(meta=>{
+    if(!meta||meta.hidden)return;
+    const data=meta.data||[];
+    const ds=meta._dataset||{};
+    const type=meta.type||chartInst.config.type;
+
+    if(type==='bar'){
+      data.forEach(bar=>{
+        if(!bar||bar.hidden)return;
+        const props=bar.getProps(['x','y','base','width','height'],true);
+        if(!props||props.width==null)return;
+        const bx=(props.x-props.width/2)*scaleX;
+        const by=Math.min(props.y,props.base)*scaleY;
+        const bw=props.width*scaleX;
+        const bh=Math.abs(props.base-props.y)*scaleY;
+        if(bw<0.5||bh<0.5)return;
+        const r=el('rect');
+        r.setAttribute('x',bx.toFixed(2));r.setAttribute('y',by.toFixed(2));
+        r.setAttribute('width',bw.toFixed(2));r.setAttribute('height',bh.toFixed(2));
+        const bc=bar.options?.backgroundColor||ds.backgroundColor;
+        const fc=Array.isArray(bc)?bc[bar.$context?.dataIndex]||bc[0]:bc;
+        r.setAttribute('fill',fc||'#4477aa');
+        r.setAttribute('stroke',bar.options?.borderColor||'none');
+        r.setAttribute('stroke-width',bar.options?.borderWidth||0);
+        const rad=bar.options?.borderRadius||0;
+        if(rad>0)r.setAttribute('rx',Math.min(rad*scaleX,bw/2,bh/2));
+        r.setAttribute('clip-path',`url(#${clipId})`);
+        svg.appendChild(r);
+      });
+    }
+
+    if(type==='line'){
+      const pts=data.map(pt=>{
+        if(!pt||pt.hidden)return null;
+        const p=pt.getProps(['x','y'],true);
+        return p?{x:p.x*scaleX,y:p.y*scaleY}:null;
+      }).filter(Boolean);
+      if(pts.length>1){
+        const path=el('path');
+        let d=`M${pts[0].x.toFixed(2)},${pts[0].y.toFixed(2)}`;
+        pts.slice(1).forEach(p=>d+=` L${p.x.toFixed(2)},${p.y.toFixed(2)}`);
+        path.setAttribute('d',d);path.setAttribute('fill','none');
+        path.setAttribute('stroke',ds.borderColor||'#333');
+        path.setAttribute('stroke-width',(ds.borderWidth||2)*scaleX);
+        path.setAttribute('clip-path',`url(#${clipId})`);
+        svg.appendChild(path);
+      }
+      // Points
+      data.forEach(pt=>{
+        if(!pt||pt.hidden)return;
+        const p=pt.getProps(['x','y'],true);if(!p)return;
+        const pr=ds.pointRadius||3;
+        if(pr>0){
+          const c=el('circle');
+          c.setAttribute('cx',(p.x*scaleX).toFixed(2));c.setAttribute('cy',(p.y*scaleY).toFixed(2));
+          c.setAttribute('r',pr*scaleX);
+          c.setAttribute('fill',ds.pointBackgroundColor||ds.borderColor||'#333');
+          c.setAttribute('clip-path',`url(#${clipId})`);
+          svg.appendChild(c);
+        }
+      });
+    }
+
+    if(type==='bubble'){
+      data.forEach(pt=>{
+        if(!pt||pt.hidden)return;
+        const p=pt.getProps(['x','y'],true);if(!p)return;
+        const raw=pt.$context?.raw||{};
+        const rVal=raw.r||3;
+        // Chart.js scales bubble radius - use the parsed radius
+        const parsedR=(pt._model?.radius||pt.options?.radius||rVal);
+        const fillC=pt.options?.backgroundColor||ds.backgroundColor;
+        const fc=Array.isArray(fillC)?fillC[pt.$context?.dataIndex]||fillC[0]:fillC;
+        const c=el('circle');
+        c.setAttribute('cx',(p.x*scaleX).toFixed(2));c.setAttribute('cy',(p.y*scaleY).toFixed(2));
+        c.setAttribute('r',(parsedR*scaleX).toFixed(2));
+        c.setAttribute('fill',fc||'rgba(100,150,200,0.7)');
+        c.setAttribute('stroke',pt.options?.borderColor||'none');
+        c.setAttribute('clip-path',`url(#${clipId})`);
+        svg.appendChild(c);
+      });
+    }
+  });
+
+  // ── Draw axes ──
+  Object.values(scales).forEach(scale=>{
+    if(!scale.ticks)return;
+    const isX=scale.axis==='x';
+    const isR=scale.position==='right';
+    const tickFs=(scale.options?.ticks?.font?.size||10)*scaleX;
+
+    // Axis line
+    const axLine=el('line');
+    axLine.setAttribute('stroke','rgba(0,0,0,0.15)');axLine.setAttribute('stroke-width',1);
+    if(isX){
+      axLine.setAttribute('x1',cL*scaleX);axLine.setAttribute('y1',cB*scaleY);
+      axLine.setAttribute('x2',cR*scaleX);axLine.setAttribute('y2',cB*scaleY);
+    } else {
+      const ax=isR?cR*scaleX:cL*scaleX;
+      axLine.setAttribute('x1',ax);axLine.setAttribute('y1',cT*scaleY);
+      axLine.setAttribute('x2',ax);axLine.setAttribute('y2',cB*scaleY);
+    }
+    svg.appendChild(axLine);
+
+    // Tick labels
+    scale.ticks.forEach((tick,i)=>{
+      const px=scale.getPixelForTick(i);
+      if(px==null||isNaN(px))return;
+      const lbl=String(tick.label||'');
+      if(!lbl)return;
+      if(isX){
+        addText(svg,lbl,px*scaleX,cB*scaleY+tickFs+3,{size:tickFs,anchor:'middle',fill:'#555'});
+      } else {
+        if(scale.options?.ticks?.display===false)return;
+        const tx=isR?cR*scaleX+5:cL*scaleX-5;
+        addText(svg,lbl,tx,px*scaleY+tickFs*0.35,{size:tickFs,anchor:isR?'start':'end',fill:'#555'});
+      }
+    });
+
+    // Axis title
+    const titleCfg=scale.options?.title;
+    if(titleCfg?.display&&titleCfg.text){
+      const titleFs=(titleCfg.font?.size||11)*scaleX;
+      if(isX){
+        addText(svg,titleCfg.text,(cL+cW/2)*scaleX,H-4,{size:titleFs,anchor:'middle',fill:'#333',weight:'bold'});
+      } else {
+        const tx=isR?W-4:titleFs+2;
+        const ty=(cT+cH/2)*scaleY;
+        const t=addText(svg,titleCfg.text,tx,ty,{size:titleFs,anchor:'middle',fill:'#333',weight:'bold'});
+        t.setAttribute('transform',`rotate(-90,${tx},${ty})`);
+      }
+    }
+  });
+
+  // ── Chart title ──
+  const titleCfg=opts.plugins?.title;
+  if(titleCfg?.display&&titleCfg.text){
+    addText(svg,titleCfg.text,W/2,titleCfg.font?.size||14,{size:titleCfg.font?.size||14,anchor:'middle',fill:'#222',weight:'bold'});
+  }
+
+  // ── Legend ──
+  const legendCfg=opts.plugins?.legend;
+  if(legendCfg?.display!==false){
+    const metas=chartInst._metasets||[];
+    let lx=cL*scaleX, ly=8;
+    metas.forEach(meta=>{
+      if(!meta||meta.hidden||!meta.label)return;
+      const boxSz=10;
+      const bc=meta._dataset?.backgroundColor;
+      const col=Array.isArray(bc)?bc[0]:bc;
+      const r=el('rect');r.setAttribute('x',lx);r.setAttribute('y',ly-boxSz/2);
+      r.setAttribute('width',boxSz);r.setAttribute('height',boxSz);r.setAttribute('fill',col||'#888');
+      svg.appendChild(r);lx+=boxSz+3;
+      const lt=el('text');lt.textContent=meta.label;
+      lt.setAttribute('x',lx);lt.setAttribute('y',ly+4);
+      lt.setAttribute('font-size',Math.max(9,fs*0.9));lt.setAttribute('font-family','Inter,Arial,sans-serif');
+      lt.setAttribute('fill','#333');svg.appendChild(lt);
+      lx+=meta.label.length*fs*0.62+16;
+    });
+  }
+
+  return svg;
+}
+
+// Wrapper: render chart and return C2S-like object with getSVG()
+function renderChartToSVG(chartInst, W, H){
+  const svgEl=chartToSVGDirect(chartInst, W, H);
+  return {getSVG:()=>svgEl};
+}
+
+const DPI_MAP={1:1,2:1.56,3:3.125,4:4.69,5:6.25,6:12.5};
+
+const APP={data:null,source:null,charts:{},settings:{
+  au:20,in:20,jo:20,dc:20,mc:2,fs:14,dpi:3,pal:'blue',fmt:'png',
+  // per-panel palette keys (independent from global pal)
+  palF0A:'blue',palF0B:'blue',
+  palF1A:'blue',palF1B:'warm',
+  palF3:'blue',palF4:'blue',palF5:'blue',
+  palF6A:'blue',palF6B:'warm',palF6C:'teal',
+  palPR:'blue'
+}};
+
+const PAL={
+  blue:  {lo:'#c6dbef',hi:'#084594',fn:(v,a,b)=>iC(v,a,b,'#c6dbef','#084594')},
+  teal:  {lo:'#b2dfdb',hi:'#00695c',fn:(v,a,b)=>iC(v,a,b,'#b2dfdb','#00695c')},
+  purple:{lo:'#e8daef',hi:'#4a235a',fn:(v,a,b)=>iC(v,a,b,'#e8daef','#4a235a')},
+  warm:  {lo:'#fdebd0',hi:'#784212',fn:(v,a,b)=>iC(v,a,b,'#fdebd0','#784212')}
+};
+function hR(h){return parseInt(h.slice(1,3),16);}
+function hG(h){return parseInt(h.slice(3,5),16);}
+function hB(h){return parseInt(h.slice(5,7),16);}
+function iC(v,a,b,c1,c2){
+  const t=Math.max(0,Math.min(1,(v-a)/((b-a)||1)));
+  return `rgba(${Math.round(hR(c1)+(hR(c2)-hR(c1))*t)},${Math.round(hG(c1)+(hG(c2)-hG(c1))*t)},${Math.round(hB(c1)+(hB(c2)-hB(c1))*t)},0.92)`;
+}
+function oG(v,a,b){return iC(v,a,b,'#ffe0b2','#bf360c');}
+function gG(v,a,b){return iC(v,a,b,'#c8e6c9','#1b5e20');}
+function pG(v,a,b){return PAL[APP.settings.pal].fn(v,a,b);}
+function palFn(key,v,a,b){return (PAL[key]||PAL.blue).fn(v,a,b);}
+function palGrad(key){const p=PAL[key]||PAL.blue;return `linear-gradient(to right,${p.lo},${p.hi})`;}
+
+// ══════════════════════════════════════════════
+// NAVIGATION
+// ══════════════════════════════════════════════
+function sp(id,el){
+  document.querySelectorAll('.pg').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  document.querySelectorAll('.ni').forEach(n=>n.classList.remove('active'));
+  if(el&&!el.classList.contains('dis'))el.classList.add('active');
+}
+
+// ══════════════════════════════════════════════
+// DRAG & DROP
+// ══════════════════════════════════════════════
+const dzEl=document.getElementById('dzEl');
+dzEl.addEventListener('dragover',e=>{e.preventDefault();dzEl.classList.add('dov');});
+dzEl.addEventListener('dragleave',()=>dzEl.classList.remove('dov'));
+dzEl.addEventListener('drop',e=>{e.preventDefault();dzEl.classList.remove('dov');hf(e.dataTransfer.files);});
+
+function hf(files){
+  if(!files||!files.length)return;
+  const file=files[0];
+  APP.source={mode:'single',files:[file.name]};
+  const ir=document.getElementById('ingestion-results');if(ir)ir.style.display='none';
+  const ip=document.getElementById('ingestion-progress');if(ip)ip.style.display='none';
+  const ext=file.name.split('.').pop().toLowerCase();
+  addFI(file);
+  if(['xlsx','xls'].includes(ext))pXLSX(file);
+  else if(ext==='csv')pCSV(file);
+  else if(ext==='bib')pBIB(file);
+  else showSt('Format .'+ext+' not supported.','err');
+}
+
+function addFI(file){
+  const fl=document.getElementById('flst');fl.innerHTML='';
+  const d=document.createElement('div');d.className='fit';d.id='fitem';
+  d.innerHTML=`<span class="mi fii">description</span><span class="fin">${file.name}</span><span class="fis">${(file.size/1024/1024).toFixed(2)} MB</span><span class="fst ld" id="fst">Loading...</span>`;
+  fl.appendChild(d);
+}
+function setFS(s,l){const e=document.getElementById('fst');if(e){e.className='fst '+s;e.textContent=l;}}
+function showSt(m,t='ld'){
+  const p=document.getElementById('pst');p.style.display='block';
+  document.getElementById('pmsg').textContent=m;
+  document.getElementById('pfill').style.width=t==='done'?'100%':t==='err'?'0%':'60%';
+}
+
+// ══════════════════════════════════════════════
+// PARSERS
+// ══════════════════════════════════════════════
+function pXLSX(file){
+  showSt('Reading Excel file...');
+  const r=new FileReader();
+  r.onload=e=>{
+    try{
+      showSt('Processing bibliometric columns...');
+      const wb=XLSX.read(new Uint8Array(e.target.result),{type:'array'});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+      if(rows.length<2){showSt('No valid data found.','err');setFS('err','Error');return;}
+      procRows(rows.slice(1),rows[0].map(h=>String(h).trim().toUpperCase()));
+    }catch(err){showSt('XLSX error: '+err.message,'err');setFS('err','Error');}
+  };
+  r.readAsArrayBuffer(file);
+}
+
+function pCSV(file){
+  showSt('Reading CSV...');
+  const r=new FileReader();
+  r.onload=e=>{
+    try{
+      const lines=e.target.result.split('\n').filter(l=>l.trim());
+      const sep=lines[0].includes('\t')?'\t':',';
+      const header=lines[0].split(sep).map(h=>h.replace(/"/g,'').trim().toUpperCase());
+      const rows=lines.slice(1).map(l=>l.split(sep).map(c=>c.replace(/"/g,'').trim()));
+      procRows(rows,header);
+    }catch(err){showSt('CSV error: '+err.message,'err');setFS('err','Error');}
+  };
+  r.readAsText(file,'UTF-8');
+}
+
+function pBIB(file){
+  showSt('Reading BibTeX...');
+  const r=new FileReader();
+  r.onload=e=>{
+    try{
+      const entries=e.target.result.split(/@\w+\{/).filter(b=>b.trim());
+      const rows=[];
+      const header=['AU','TI','SO','PY','TC','C1','DE','AB','DI','SR'];
+      for(const ent of entries){
+        const g=(k)=>{const m=new RegExp(k+'\\s*=\\s*[{"]([^}"]+)[}"]','i').exec(ent);return m?m[1].trim():'';};
+        const au=(g('author')||'').replace(/ and /g,';');
+        const ti=g('title'),so=g('journal')||g('booktitle'),py=g('year'),doi=g('doi');
+        const tc=parseInt((g('note').match(/\d+/)||['0'])[0]);
+        if(au||ti){
+          const row=new Array(header.length).fill('');
+          row[0]=au;row[1]=ti;row[2]=so;row[3]=py;row[4]=tc;row[8]=doi;
+          row[9]=(au.split(';')[0]||'').trim()+', '+py+', '+(so||'').toUpperCase().slice(0,20);
+          rows.push(row);
+        }
+      }
+      if(!rows.length){showSt('No BibTeX entries found.','err');setFS('err','Error');return;}
+      procRows(rows,header);
+    }catch(err){showSt('BIB error: '+err.message,'err');setFS('err','Error');}
+  };
+  r.readAsText(file,'UTF-8');
+}
+
+// ══════════════════════════════════════════════
+// DATA PROCESSING
+// ══════════════════════════════════════════════
+function procRows(rows,header){
+  showSt('Computing bibliometric metrics...');
+  setTimeout(()=>{
+    try{
+      document.getElementById('pfill').style.width='35%';
+      // Build column index
+      const idx={};
+      ['AU','TI','SO','PY','TC','C1','DE','AB','DI','SR','AF','AU_UN'].forEach(k=>{
+        const i=header.indexOf(k);if(i>=0)idx[k]=i;
+      });
+      if(!('SO' in idx)){const i=header.findIndex(h=>h.includes('JOURNAL')||h.includes('SOURCE')||h.includes('SO'));if(i>=0)idx.SO=i;}
+      if(!('PY' in idx)){const i=header.findIndex(h=>h.includes('YEAR')||h==='PY');if(i>=0)idx.PY=i;}
+      if(!('TC' in idx)){const i=header.findIndex(h=>h==='TC'||h.includes('CITED'));if(i>=0)idx.TC=i;}
+      if(!('C1' in idx)){const i=header.findIndex(h=>h.includes('AFFIL')||h==='C1');if(i>=0)idx.C1=i;}
+
+      const get=(row,k)=>idx[k]!==undefined?String(row[idx[k]]||'').trim():'';
+      const CY=new Date().getFullYear();
+
+      // Accumulators
+      const auCnt={},auFrac={},auTC={},auYD={};
+      const soCnt={};
+      const inCnt={};
+      const yrCnt={};
+      const docRecs=[];
+      const coCnt={};// country → count
+      const coPairs={};// "A||B" → count (for edges)
+
+      document.getElementById('pfill').style.width='55%';
+      let totalTC=0,validRows=0;
+
+      for(const row of rows){
+        const au=get(row,'AU'),so=get(row,'SO');
+        const py=parseInt(get(row,'PY'))||0;
+        const tc=parseInt(get(row,'TC'))||0;
+        const c1=get(row,'C1')||'';
+        const ti=get(row,'TI'),sr=get(row,'SR');
+
+        if(!au&&!ti)continue;
+        validRows++;totalTC+=tc;
+
+        // Authors
+        const auList=au.split(';').map(a=>a.trim()).filter(Boolean);
+        const frac=auList.length>0?1/auList.length:0;
+        auList.forEach(a=>{
+          auCnt[a]=(auCnt[a]||0)+1;
+          auFrac[a]=(auFrac[a]||0)+frac;
+          auTC[a]=(auTC[a]||0)+tc;
+          if(!auYD[a])auYD[a]={};
+          if(py>1900){
+            if(!auYD[a][py])auYD[a][py]={count:0,tc:0};
+            auYD[a][py].count++;auYD[a][py].tc+=tc;
+          }
+        });
+
+        // Sources — normalize to Title Case
+        if(so){const sn=toTC(so);soCnt[sn]=(soCnt[sn]||0)+1;}
+
+        // Year
+        if(py>1900)yrCnt[py]=(yrCnt[py]||0)+1;
+
+        // Institutions & Countries from C1
+        if(c1){
+          const affParts=c1.split(';');
+          const docCountries=[];
+          affParts.forEach(aff=>{
+            const parts=aff.trim().replace(/^\[[^\]]*\]\s*/,'').split(',').map(p=>p.trim()).filter(Boolean);
+            if(parts.length>0){
+              const inst=parts[0].trim();
+              if(inst.length>3&&inst.length<120)inCnt[inst]=(inCnt[inst]||0)+1;
+            }
+            // Country = last non-empty segment that is purely alphabetic (no digits)
+            for(let pi=parts.length-1;pi>=0;pi--){
+              const seg=parts[pi].trim().replace(/[^A-Za-z\s\-']/g,'').trim();
+              if(seg.length>2&&seg.length<50&&!/^\d/.test(seg)&&seg.split(' ').length<=4){
+                const country=seg;
+                coCnt[country]=(coCnt[country]||0)+1;
+                if(!docCountries.includes(country))docCountries.push(country);
+                break;
+              }
+            }
+          });
+          // Co-authorship edges
+          for(let i=0;i<docCountries.length;i++){
+            for(let j=i+1;j<docCountries.length;j++){
+              if(docCountries[i]===docCountries[j])continue;
+              const key=[docCountries[i],docCountries[j]].sort().join('||');
+              coPairs[key]=(coPairs[key]||0)+1;
+            }
+          }
+        }
+
+        // Cited doc record
+        if(tc>0){
+          const yo=py>1900?Math.max(1,CY-py):1;
+          const tcy=tc/yo;
+          const lbl=sr||(au.split(';')[0].trim()+' ('+py+')');
+          docRecs.push({lbl:lbl.slice(0,38),tc,tcy,py,tcn:0});
+        }
+      }
+
+      // Normalize TC
+      const avgTcy=docRecs.length?docRecs.reduce((s,d)=>s+d.tcy,0)/docRecs.length:1;
+      docRecs.forEach(d=>d.tcn=d.tcy/Math.max(0.01,avgTcy));
+
+      document.getElementById('pfill').style.width='85%';
+
+      const years=Object.keys(yrCnt).map(Number).sort((a,b)=>a-b);
+      APP.data={auCnt,auFrac,auTC,auYD,soCnt,inCnt,yrCnt,docRecs,coCnt,coPairs,
+        totalDocs:validRows,totalSources:Object.keys(soCnt).length,
+        totalAuthors:Object.keys(auCnt).length,totalTC,avgTC:validRows?totalTC/validRows:0,
+        years};
+
+      document.getElementById('pfill').style.width='100%';
+      showSt(`✓ ${validRows} documents processed successfully.`,'done');
+      setFS('ok','Loaded');
+      renderSum();enableNav();
+    }catch(err){showSt('Processing error: '+err.message,'err');setFS('err','Error');console.error(err);}
+  },60);
+}
+
+function toTC(s){return s.replace(/\w\S*/g,t=>t.charAt(0).toUpperCase()+t.slice(1).toLowerCase());}
+
+function renderSum(){
+  const d=APP.data;
+  const yrs=d.years;
+  const minY=yrs.length?yrs[0]:0,maxY=yrs.length?yrs[yrs.length-1]:0;
+  const cards=[
+    {lb:'Documents',vl:d.totalDocs.toLocaleString(),sb:'total in dataset'},
+    {lb:'Authors',vl:d.totalAuthors.toLocaleString(),sb:'unique authors'},
+    {lb:'Sources',vl:d.totalSources.toLocaleString(),sb:'unique journals'},
+    {lb:'Timespan',vl:minY+'–'+maxY,sb:(maxY-minY+1)+' years'},
+    {lb:'Total TC',vl:d.totalTC.toLocaleString(),sb:'total citations'},
+    {lb:'Avg TC/doc',vl:d.avgTC.toFixed(1),sb:'per document'},
+  ];
+  document.getElementById('scards').innerHTML=cards.map(c=>`<div class="sc"><div class="lb">${c.lb}</div><div class="vl">${c.vl}</div><div class="sb">${c.sb}</div></div>`).join('');
+  document.getElementById('dsum').style.display='block';
+  document.getElementById('btn-gen').disabled=false;
+  document.getElementById('btn-gen2').disabled=false;
+}
+
+function enableNav(){
+  ['fig0','fig1','fig2','fig3','fig4','fig5','fig6','settings'].forEach(id=>{
+    const e=document.getElementById('nav-'+id);if(e)e.classList.remove('dis');
+  });
+  seedYrSliders();
+}
+
+// ══════════════════════════════════════════════
+// SLIDER HELPERS
+// ══════════════════════════════════════════════
+const KEY_MAP={au:'au',in:'in',jo:'jo',dc:'dc',mc:'mc'};
+function usl(k){
+  const v=parseInt(document.getElementById('s-'+k).value);
+  document.getElementById('v-'+k).textContent=v;
+  APP.settings[k]=v;syncAll();
+}
+function syncS(k,sid,vid){
+  const v=parseInt(document.getElementById(sid).value);
+  document.getElementById(vid).textContent=v;
+  APP.settings[k]=v;syncAll();
+}
+function uslG(k){
+  const v=parseInt(document.getElementById('gs-s-'+k).value);
+  document.getElementById('gs-v-'+k).textContent=v;
+  APP.settings[k]=v;syncAll();
+}
+function syncAll(){
+  const keys=['au','in','jo','dc','mc'];
+  keys.forEach(k=>{
+    const v=APP.settings[k];
+    [['s-'+k,'v-'+k],['gs-s-'+k,'gs-v-'+k]].forEach(([sid,vid])=>{
+      const se=document.getElementById(sid),ve=document.getElementById(vid);
+      if(se)se.value=v;if(ve)ve.textContent=v;
+    });
+    const localPairs={au:[['f1-s','f1-v'],['f2-s','f2-v']],in:[['f3-s','f3-v']],jo:[['f4-s','f4-v']],dc:[['f6-s','f6-v']],mc:[['f5-mc','f5-mc-v']]};
+    (localPairs[k]||[]).forEach(([sid,vid])=>{
+      const se=document.getElementById(sid),ve=document.getElementById(vid);
+      if(se)se.value=v;if(ve)ve.textContent=v;
+    });
+  });
+}
+function ufs(){
+  const v=parseInt(document.getElementById('s-fs').value);
+  document.getElementById('v-fs').textContent=v;
+  APP.settings.fs=v;
+  document.documentElement.style.setProperty('--fbase',v+'px');
+  const gsfs=document.getElementById('gs-s-fs');if(gsfs)gsfs.value=v;
+  const gsfsv=document.getElementById('gs-v-fs');if(gsfsv)gsfsv.textContent=v;
+}
+function ufsG(){
+  const v=parseInt(document.getElementById('gs-s-fs').value);
+  document.getElementById('gs-v-fs').textContent=v;APP.settings.fs=v;
+  document.documentElement.style.setProperty('--fbase',v+'px');
+  const sf=document.getElementById('s-fs');if(sf)sf.value=v;
+  const vf=document.getElementById('v-fs');if(vf)vf.textContent=v;
+}
+function uppal(){
+  const v=document.getElementById('s-pal').value;
+  APP.settings.pal=v;
+  // Propagate to all per-panel palette settings
+  ['palF0A','palF0B','palF1A','palF1B','palF3','palF4','palF5','palF6A','palF6B','palF6C','palPR'].forEach(k=>APP.settings[k]=v);
+  // Sync every per-tab palette selector
+  ['f0-pa-pal','f0-pb-pal','f1-pa-pal','f1-pb-pal','f3-pal','f4-pal','f5-pal',
+   'f6-pa-pal','f6-pb-pal','f6-pc-pal','pr-pal','gs-s-pal'].forEach(id=>{
+    const el=document.getElementById(id);if(el)el.value=v;
+  });
+}
+
+// ══════════════════════════════════════════════
+// GENERATE ALL
+// ══════════════════════════════════════════════
+function genAll(){
+  if(!APP.data){alert('Please load a file first!');return;}
+  rF0();rF1();rF2();rF3();rF4();rF5();rF6();
+  sp('fig0',document.getElementById('nav-fig0'));
+}
+
+// ── SIZE HELPERS ──
+function rSz(wrapperId, w){
+  const el=document.getElementById(wrapperId);
+  if(el)el.style.width=w+'px';
+}
+function rSzPair(id1,id2,w){rSz(id1,w);rSz(id2,w);}
+function rSzThree(id1,id2,id3,w){rSz(id1,w);rSz(id2,w);rSz(id3,w);}
+
+function topN(obj,n){
+  return Object.entries(obj).filter(([k])=>k&&k!=='undefined'&&k!=='null').sort((a,b)=>b[1]-a[1]).slice(0,n);
+}
+function dc(id){if(APP.charts[id]){APP.charts[id].destroy();delete APP.charts[id];}}
+
+// ─── Panel letter label plugin ───
+function panelLbl(letter,fs){
+  return {id:'pl_'+letter,afterDraw(ch){
+    const c=ch.ctx;c.save();
+    c.font=`bold ${(fs||14)+2}px Inter,Arial,sans-serif`;
+    c.fillStyle='#1a1a1a';c.textBaseline='top';
+    c.fillText(letter,7,5);c.restore();
+  }};
+}
+
+// ─── F2 palette definitions ───
+const F2_PALS={
+  red:{lo:'#fcbba1',hi:'#cb181d',fn:(v,mn,mx)=>{const t=(mx>mn)?(v-mn)/(mx-mn):0;return `rgb(${Math.round(252-t*108)},${Math.round(187-t*163)},${Math.round(161-t*148)})`;},grad:['#fcbba1','#cb181d']},
+  blue:{lo:'#c6dbef',hi:'#084594',fn:(v,mn,mx)=>{const t=(mx>mn)?(v-mn)/(mx-mn):0;return `rgb(${Math.round(198-t*165)},${Math.round(219-t*150)},${Math.round(239-t*92)})`;},grad:['#c6dbef','#084594']},
+  green:{lo:'#c8e6c9',hi:'#1b5e20',fn:(v,mn,mx)=>{const t=(mx>mn)?(v-mn)/(mx-mn):0;return `rgb(${Math.round(200-t*173)},${Math.round(230-t*136)},${Math.round(201-t*169)})`;},grad:['#c8e6c9','#1b5e20']},
+  purple:{lo:'#e8d5f5',hi:'#6a0dad',fn:(v,mn,mx)=>{const t=(mx>mn)?(v-mn)/(mx-mn):0;return `rgb(${Math.round(232-t*126)},${Math.round(213-t*200)},${Math.round(245-t*100)})`;},grad:['#e8d5f5','#6a0dad']},
+  teal:{lo:'#b2ebf2',hi:'#006064',fn:(v,mn,mx)=>{const t=(mx>mn)?(v-mn)/(mx-mn):0;return `rgb(${Math.round(178-t*178)},${Math.round(235-t*139)},${Math.round(242-t*146)})`;},grad:['#b2ebf2','#006064']},
+};
+
+// ══════════════════════════════════════════════
+// FIG 0 — ANNUAL PRODUCTION
+// ══════════════════════════════════════════════
+function rF0(){
+  if(!APP.data)return;
+  const fs=parseInt(document.getElementById('f0-fs').value)||APP.settings.fs;
+  const yrCnt=APP.data.yrCnt;
+  const yrs=Object.keys(yrCnt).map(Number).sort((a,b)=>a-b);
+  const counts=yrs.map(y=>yrCnt[y]||0);
+  let cum=0;const cumul=counts.map(v=>(cum+=v,cum));
+
+  // ggplot2-style plugin: gray chart area + white grid + "A" panel label
+  const ggThemeA={
+    id:'ggThemeA',
+    beforeDraw(chart){
+      const{ctx,chartArea:ca}=chart;if(!ca)return;
+      ctx.save();
+      // Gray plot area (ggplot2 theme_gray)
+      ctx.fillStyle='#EBEBEB';
+      ctx.fillRect(ca.left,ca.top,ca.width,ca.height);
+      ctx.restore();
+    },
+    afterDraw(chart){
+      const{ctx}=chart;
+      ctx.save();
+      // Panel label "A"
+      ctx.font=`bold ${fs+2}px Inter,Arial,sans-serif`;
+      ctx.fillStyle='#1a1a1a';
+      ctx.textBaseline='top';
+      ctx.fillText('A',7,5);
+      ctx.restore();
+    }
+  };
+
+  dc('f0-a');
+  const mnC=Math.min(...counts),mxC=Math.max(...counts);
+  const palA=APP.settings.palF0A||'blue';
+  APP.charts['f0-a']=new Chart(document.getElementById('f0-a'),{
+    type:'bar',
+    plugins:[ggThemeA],
+    data:{labels:yrs,datasets:[
+      {type:'bar',label:'Annual Publications',data:counts,
+        backgroundColor:counts.map(v=>palFn(palA,v,mnC,mxC)),
+        borderWidth:0,
+        yAxisID:'y',order:2},
+      {type:'line',label:'Cumulative Publications',data:cumul,
+        borderColor:'#8B0000',borderWidth:2.2,
+        pointRadius:4,pointBackgroundColor:'#8B0000',pointBorderColor:'#8B0000',
+        fill:false,yAxisID:'y2',tension:0,order:1}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{
+        legend:{display:true,position:'top',labels:{font:{size:fs-2},boxWidth:14,padding:10,
+          generateLabels(chart){
+            return chart.data.datasets.map((ds,i)=>({
+              text:ds.label,
+              fillStyle:i===0?palFn(palA,mxC,mnC,mxC):'#8B0000',
+              strokeStyle:i===0?palFn(palA,mxC,mnC,mxC):'#8B0000',
+              lineWidth:i===0?0:2,
+              datasetIndex:i,hidden:false
+            }));
+          }
+        }}
+      },
+      scales:{
+        x:{title:{display:true,text:'Year',font:{size:fs-2,weight:'bold'},color:'#333'},
+          ticks:{font:{size:fs-3},maxRotation:45,autoSkip:true,maxTicksLimit:15,callback:(v,i)=>yrs[i],color:'#333'},
+          grid:{color:'white',lineWidth:1},
+          border:{color:'rgba(0,0,0,0.15)'}},
+        y:{position:'left',
+          title:{display:true,text:'Annual Publications',font:{size:fs-2,weight:'bold'},color:'#333'},
+          ticks:{font:{size:fs-3},color:'#333'},
+          grid:{color:'white',lineWidth:1},
+          border:{color:'rgba(0,0,0,0.15)'}},
+        y2:{position:'right',
+          title:{display:true,text:'Cumulative Publications',font:{size:fs-2,weight:'bold'},color:'#8B0000'},
+          ticks:{font:{size:fs-3},color:'#8B0000'},
+          grid:{drawOnChartArea:false},
+          border:{color:'rgba(0,0,0,0.15)'}}
+      }}
+  });
+
+  // Panel B — Decade Boxplot (D3)
+  const decMap={};
+  yrs.forEach(y=>{
+    const dec=Math.floor(y/10)*10;
+    if(!decMap[dec])decMap[dec]=[];
+    decMap[dec].push(yrCnt[y]||0);
+  });
+  APP._decMap=decMap; // store for re-render
+  APP._decFs=fs;
+  rF0B();
+  syncLegendSpecs();
+}
+
+// ─── D3 Boxplot renderer for Panel B ───
+function rF0B(){
+  if(!APP._decMap)return;
+  const decMap=APP._decMap;
+  const fs=parseInt(document.getElementById('f0-fs').value)||APP.settings.fs;
+  APP._decFs=fs;
+
+  const svgEl=document.getElementById('f0-b-svg');
+  const wrap=document.getElementById('f0-bw');
+  const W=wrap.clientWidth||parseInt(document.getElementById('f0-wb').value)||900;
+  const H=wrap.clientHeight||parseInt(document.getElementById('f0-hb').value)||280;
+
+  const decKeys=Object.keys(decMap).map(Number).sort((a,b)=>a-b);
+  const decLabels=decKeys.map(d=>d+'s');
+  // Palette-derived decade colors (evenly distributed across the selected palette range)
+  const palB=APP.settings.palF0B||'blue';
+  const decColors=decKeys.reduce((acc,d,i)=>{
+    acc[d]=palFn(palB,i,0,Math.max(1,decKeys.length-1));
+    return acc;
+  },{});
+  function quartile(arr,q){
+    const s=[...arr].sort((a,b)=>a-b);
+    const pos=(s.length-1)*q;
+    const base=Math.floor(pos);
+    const rest=pos-base;
+    if(s[base+1]!==undefined)return s[base]+rest*(s[base+1]-s[base]);
+    return s[base];
+  }
+  const stats=decKeys.map(d=>{
+    const a=[...decMap[d]].sort((x,y)=>x-y);
+    const q1=quartile(a,0.25);
+    const med=quartile(a,0.5);
+    const q3=quartile(a,0.75);
+    const iqr=q3-q1;
+    const lo=Math.max(a[0], q1-1.5*iqr);
+    const hi=Math.min(a[a.length-1], q3+1.5*iqr);
+    const outliers=a.filter(v=>v<lo||v>hi);
+    return {q1,med,q3,lo,hi,min:a[0],max:a[a.length-1],outliers,n:a.length};
+  });
+
+  const allVals=decKeys.flatMap(d=>decMap[d]);
+  const yMin=0;
+  const yMax=Math.max(...allVals)*1.08;
+
+  // Margins (top increased to accommodate panel label "B")
+  const mg={top:36,right:22,bottom:55,left:58};
+  const cW=W-mg.left-mg.right;
+  const cH=H-mg.top-mg.bottom;
+
+  // Scales
+  const xBand=d3.scaleBand().domain(decLabels).range([0,cW]).padding(0.35);
+  const yScale=d3.scaleLinear().domain([yMin,yMax]).range([cH,0]).nice();
+
+  const bw=xBand.bandwidth();
+
+  // Clear and set up SVG
+  d3.select(svgEl).selectAll('*').remove();
+  const svg=d3.select(svgEl)
+    .attr('viewBox',`0 0 ${W} ${H}`)
+    .attr('width',W).attr('height',H)
+    .style('background','white');
+
+  // White outer bg
+  svg.append('rect').attr('width',W).attr('height',H).attr('fill','white');
+
+  const g=svg.append('g').attr('transform',`translate(${mg.left},${mg.top})`);
+
+  // ggplot2-style gray chart area
+  g.append('rect').attr('width',cW).attr('height',cH).attr('fill','#EBEBEB');
+
+  // Grid lines (white on gray, horizontal)
+  const yTicks=yScale.ticks(6);
+  g.selectAll('.ygrid').data(yTicks).enter().append('line')
+    .attr('class','ygrid')
+    .attr('x1',0).attr('x2',cW)
+    .attr('y1',d=>yScale(d)).attr('y2',d=>yScale(d))
+    .attr('stroke','white').attr('stroke-width',1.2);
+  // Vertical grid lines (white)
+  g.selectAll('.xgrid').data(decLabels).enter().append('line')
+    .attr('class','xgrid')
+    .attr('x1',d=>xBand(d)+bw/2).attr('x2',d=>xBand(d)+bw/2)
+    .attr('y1',0).attr('y2',cH)
+    .attr('stroke','white').attr('stroke-width',0.8);
+
+  // X axis
+  const xAxisG=g.append('g').attr('transform',`translate(0,${cH})`);
+  xAxisG.append('line').attr('x1',0).attr('x2',cW).attr('stroke','rgba(0,0,0,0.18)').attr('stroke-width',0.8);
+  decLabels.forEach((lbl,i)=>{
+    xAxisG.append('text')
+      .attr('x',xBand(lbl)+bw/2).attr('y',fs+6)
+      .attr('text-anchor','middle')
+      .attr('font-family','Inter,Arial,sans-serif').attr('font-size',fs-1).attr('fill','#333')
+      .text(lbl);
+  });
+  // X axis title
+  g.append('text')
+    .attr('x',cW/2).attr('y',cH+mg.bottom-6)
+    .attr('text-anchor','middle')
+    .attr('font-family','Inter,Arial,sans-serif').attr('font-size',fs-1).attr('font-weight','bold').attr('fill','#333')
+    .text('Decade');
+
+  // Y axis
+  const yAxisG=g.append('g');
+  yAxisG.append('line').attr('x1',0).attr('x2',0).attr('y1',0).attr('y2',cH).attr('stroke','rgba(0,0,0,0.18)').attr('stroke-width',0.8);
+  yTicks.forEach(t=>{
+    yAxisG.append('text')
+      .attr('x',-7).attr('y',yScale(t)+fs*0.35)
+      .attr('text-anchor','end')
+      .attr('font-family','Inter,Arial,sans-serif').attr('font-size',fs-2).attr('fill','#333')
+      .text(t);
+    yAxisG.append('line').attr('x1',-4).attr('x2',0).attr('y1',yScale(t)).attr('y2',yScale(t)).attr('stroke','rgba(0,0,0,0.18)').attr('stroke-width',0.8);
+  });
+  // Y axis title
+  g.append('text')
+    .attr('transform',`rotate(-90)`)
+    .attr('x',-cH/2).attr('y',-mg.left+14)
+    .attr('text-anchor','middle')
+    .attr('font-family','Inter,Arial,sans-serif').attr('font-size',fs-1).attr('font-weight','bold').attr('fill','#333')
+    .text('Number of Publications');
+
+  // Draw boxplots
+  decKeys.forEach((d,i)=>{
+    const st=stats[i];
+    const lbl=d+'s';
+    const cx=xBand(lbl)+bw/2;
+    const col=decColors[d]||'#888';
+    const bxGrp=g.append('g');
+
+    // Whiskers
+    bxGrp.append('line') // lower whisker vertical
+      .attr('x1',cx).attr('x2',cx)
+      .attr('y1',yScale(st.lo)).attr('y2',yScale(st.q1))
+      .attr('stroke',col).attr('stroke-width',1.5).attr('stroke-dasharray','4,2');
+    bxGrp.append('line') // upper whisker vertical
+      .attr('x1',cx).attr('x2',cx)
+      .attr('y1',yScale(st.q3)).attr('y2',yScale(st.hi))
+      .attr('stroke',col).attr('stroke-width',1.5).attr('stroke-dasharray','4,2');
+    // Whisker caps
+    const wCap=bw*0.28;
+    bxGrp.append('line').attr('x1',cx-wCap).attr('x2',cx+wCap)
+      .attr('y1',yScale(st.lo)).attr('y2',yScale(st.lo))
+      .attr('stroke',col).attr('stroke-width',1.8);
+    bxGrp.append('line').attr('x1',cx-wCap).attr('x2',cx+wCap)
+      .attr('y1',yScale(st.hi)).attr('y2',yScale(st.hi))
+      .attr('stroke',col).attr('stroke-width',1.8);
+
+    // IQR Box
+    const boxTop=yScale(st.q3);
+    const boxH=Math.max(1,yScale(st.q1)-yScale(st.q3));
+    bxGrp.append('rect')
+      .attr('x',xBand(lbl)).attr('y',boxTop)
+      .attr('width',bw).attr('height',boxH)
+      .attr('fill',col).attr('fill-opacity',0.55)
+      .attr('stroke',col).attr('stroke-width',1.8)
+      .attr('rx',2);
+
+    // Median line
+    bxGrp.append('line')
+      .attr('x1',xBand(lbl)).attr('x2',xBand(lbl)+bw)
+      .attr('y1',yScale(st.med)).attr('y2',yScale(st.med))
+      .attr('stroke',col).attr('stroke-width',2.5);
+
+    // Outliers
+    st.outliers.forEach(v=>{
+      bxGrp.append('circle')
+        .attr('cx',cx).attr('cy',yScale(v))
+        .attr('r',3).attr('fill','none')
+        .attr('stroke',col).attr('stroke-width',1.5);
+    });
+  });
+
+  // Legend
+  const legX=cW-decKeys.length*(bw+14);
+  const legY=-mg.top+6;
+  const legG=g.append('g').attr('transform',`translate(${Math.max(0,legX)},${legY})`);
+  decKeys.forEach((d,i)=>{
+    const col=decColors[d]||'#888';
+    const lx=i*(Math.min(bw,60)+8);
+    legG.append('rect').attr('x',lx).attr('y',0).attr('width',14).attr('height',10)
+      .attr('fill',col).attr('fill-opacity',0.6).attr('stroke',col).attr('rx',2);
+    legG.append('text').attr('x',lx+17).attr('y',10)
+      .attr('font-family','Inter,Arial,sans-serif').attr('font-size',Math.max(9,fs-3)).attr('fill','#333')
+      .text(d+'s');
+  });
+  // Chart area border (thin, like ggplot2)
+  g.append('rect').attr('width',cW).attr('height',cH)
+    .attr('fill','none').attr('stroke','rgba(0,0,0,0.18)').attr('stroke-width',0.8);
+
+  // Panel label "B" — top-left of full SVG
+  svg.append('text')
+    .attr('x',7).attr('y',fs+3)
+    .attr('font-family','Inter,Arial,sans-serif')
+    .attr('font-size',fs+2).attr('font-weight','bold').attr('fill','#1a1a1a')
+    .text('B');
+  syncLegendSpecs();
+}
+
+// ══════════════════════════════════════════════
+// FIG 1 — AUTHORS PRODUCTIVITY
+// ══════════════════════════════════════════════
+function rF1(){
+  if(!APP.data)return;
+  const n=APP.settings.au;
+  const fs=parseInt(document.getElementById('f1-fs').value)||APP.settings.fs;
+  const top=topN(APP.data.auCnt,n);
+  const labels=top.map(([k])=>k).reverse();
+  const rawV=top.map(([,v])=>v).reverse();
+  const fracV=top.map(([k])=>parseFloat((APP.data.auFrac[k]||0).toFixed(2))).reverse();
+  const mnR=Math.min(...rawV),mxR=Math.max(...rawV);
+  const mnF=Math.min(...fracV),mxF=Math.max(...fracV);
+  const h=Math.max(300,n*28);
+  document.getElementById('f1-lw').style.height=h+'px';
+  document.getElementById('f1-rw').style.height=h+'px';
+  dc('f1-l');dc('f1-r');
+  const palA=APP.settings.palF1A||'blue';
+  const palB=APP.settings.palF1B||'warm';
+
+  // LEFT — raw articles
+  APP.charts['f1-l']=new Chart(document.getElementById('f1-l'),{
+    type:'bar',
+    plugins:[panelLbl('A',fs)],
+    data:{labels,datasets:[{label:'Articles',data:rawV,backgroundColor:rawV.map(v=>palFn(palA,v,mnR,mxR)),borderRadius:3}]},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:true,position:'top',labels:{font:{size:fs-2},boxWidth:12,padding:8}},
+        datalabels:{display:false},
+        tooltip:{callbacks:{label:ctx=>`Articles: ${ctx.raw}`}}},
+      scales:{
+        x:{title:{display:true,text:'Articles',font:{size:fs-2,weight:'bold'}},ticks:{font:{size:fs-3}}},
+        y:{title:{display:true,text:'Authors',font:{size:fs-2,weight:'bold'}},ticks:{font:{size:fs-3}}}
+      }}
+  });
+
+  // RIGHT — fractionalized
+  APP.charts['f1-r']=new Chart(document.getElementById('f1-r'),{
+    type:'bar',
+    plugins:[panelLbl('B',fs)],
+    data:{labels,datasets:[{label:'Articles Fractionalized',data:fracV,backgroundColor:fracV.map(v=>palFn(palB,v,mnF,mxF)),borderRadius:3}]},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:true,position:'top',labels:{font:{size:fs-2},boxWidth:12,padding:8}},
+        tooltip:{callbacks:{label:ctx=>`Fractionalized: ${Number(ctx.raw).toFixed(2)}`}}},
+      scales:{
+        x:{title:{display:true,text:'Articles Fractionalized',font:{size:fs-2,weight:'bold'}},ticks:{font:{size:fs-3}}},
+        y:{title:{display:true,text:'Authors',font:{size:fs-2,weight:'bold'}},ticks:{font:{size:fs-3}}}
+      }}
+  });
+  // Update legend gradients
+  const lg1l=document.getElementById('lg1l');if(lg1l)lg1l.style.background=palGrad(palA);
+  const lg1r=document.getElementById('lg1r');if(lg1r)lg1r.style.background=palGrad(palB);
+  syncLegendSpecs();
+}
+
+// ══════════════════════════════════════════════
+// FIG 2 — AUTHORS OVER TIME
+// ══════════════════════════════════════════════
+let F2_AUTHORS=[];// store for export
+
+function clampYrMax(){
+  const mn=document.getElementById('f2-yr-min');
+  const mx=document.getElementById('f2-yr-max');
+  if(!mn||!mx)return;
+  if(parseInt(mn.value)>parseInt(mx.value))mx.value=mn.value;
+  document.getElementById('f2-yr-max-v').textContent=mx.value;
+}
+function clampYrMin(){
+  const mn=document.getElementById('f2-yr-min');
+  const mx=document.getElementById('f2-yr-max');
+  if(!mn||!mx)return;
+  if(parseInt(mx.value)<parseInt(mn.value))mn.value=mx.value;
+  document.getElementById('f2-yr-min-v').textContent=mn.value;
+}
+
+function seedYrSliders(){
+  if(!APP.data)return;
+  const allYrs=Object.keys(APP.data.yrCnt).map(Number).filter(y=>y>1900&&y<=2030);
+  if(!allYrs.length)return;
+  const dataMin=Math.min(...allYrs);
+  const dataMax=Math.max(...allYrs)+1;
+  const mn=document.getElementById('f2-yr-min');
+  const mx=document.getElementById('f2-yr-max');
+  const mnV=document.getElementById('f2-yr-min-v');
+  const mxV=document.getElementById('f2-yr-max-v');
+  if(mn){mn.min=dataMin;mn.max=dataMax;mn.value=dataMin;if(mnV)mnV.textContent=dataMin;}
+  if(mx){mx.min=dataMin;mx.max=dataMax;mx.value=dataMax;if(mxV)mxV.textContent=dataMax;}
+}
+
+function rF2(){
+  if(!APP.data)return;
+  const n=APP.settings.au;
+  const fs=parseInt(document.getElementById('f2-fs').value)||APP.settings.fs;
+  const palKey=(document.getElementById('f2-pal')?.value)||'red';
+  const pal=F2_PALS[palKey]||F2_PALS.red;
+
+  // Year range from sliders (fall back to data extremes if sliders not yet seeded)
+  const allDataYrs=Object.keys(APP.data.yrCnt).map(Number).filter(y=>y>1900);
+  const dataMin=allDataYrs.length?Math.min(...allDataYrs):2000;
+  const dataMax=allDataYrs.length?Math.max(...allDataYrs)+1:2025;
+  const slMin=parseInt(document.getElementById('f2-yr-min')?.value)||dataMin;
+  const slMax=parseInt(document.getElementById('f2-yr-max')?.value)||dataMax;
+  const yrMin=Math.min(slMin,slMax);
+  const yrMax=Math.max(slMin,slMax);
+
+  const top=topN(APP.data.auCnt,n);
+  const authors=top.map(([k])=>k);
+  F2_AUTHORS=authors;
+  const datasets=[];
+  let allTCy=[];let allCounts=[];
+  authors.forEach(a=>{
+    Object.values(APP.data.auYD[a]||{}).forEach((v,)=>{
+      if(v.tc>0)allTCy.push(v.tc);
+      if(v.count>0)allCounts.push(v.count);
+    });
+  });
+  const mnTC=allTCy.length?Math.min(...allTCy):0,mxTC=allTCy.length?Math.max(...allTCy):1;
+  const mnC=allCounts.length?Math.min(...allCounts):0,mxC=allCounts.length?Math.max(...allCounts):1;
+
+  authors.forEach((a,i)=>{
+    const yi=authors.length-1-i;
+    const yd=APP.data.auYD[a]||{};
+    // only years inside selected range
+    const sortedYrs=Object.keys(yd).map(Number).sort((x,y)=>x-y).filter(yr=>yr>=yrMin&&yr<=yrMax);
+    if(!sortedYrs.length)return;
+    datasets.push({type:'line',data:sortedYrs.map(yr=>({x:yr,y:yi})),borderColor:'rgba(0,0,0,0.12)',borderWidth:1.2,pointRadius:0,fill:false,tension:0,showLine:true,order:2,label:''});
+    const pts=sortedYrs.map(yr=>({x:yr,y:yi,r:Math.min(Math.sqrt(yd[yr].count||1)*5+3,18),tc:yd[yr].tc||0,cnt:yd[yr].count||0}));
+    datasets.push({type:'bubble',data:pts,backgroundColor:pts.map(p=>pal.fn(p.tc,mnTC,mxTC)),borderWidth:0,order:1,label:a});
+  });
+
+  // Build integer tick list from active years in range
+  const activeYrs=new Set();
+  authors.forEach(a=>{
+    Object.keys(APP.data.auYD[a]||{}).map(Number).filter(yr=>yr>=yrMin&&yr<=yrMax).forEach(yr=>activeYrs.add(yr));
+  });
+  const tickYrs=[...activeYrs].sort((a,b)=>a-b);
+
+  // Height: use slider if set, else compute from n
+  const slH=parseInt(document.getElementById('f2-hh')?.value)||0;
+  const h=slH>0?slH:Math.max(400,n*38);
+  document.getElementById('f2-w').style.height=h+'px';
+  const slEl=document.getElementById('f2-hh');
+  if(slEl&&!slEl._touched)slEl.value=h;
+  dc('f2-c');
+
+  APP.charts['f2-c']=new Chart(document.getElementById('f2-c'),{
+    type:'bubble',
+    data:{datasets},
+    options:{
+      responsive:true,
+      maintainAspectRatio:false,
+      layout:{padding:{left:10,right:20,top:10,bottom:10}},
+      plugins:{
+        legend:{display:false},
+        tooltip:{callbacks:{label:ctx=>{
+          if(ctx.raw&&ctx.raw.r!=null){
+            const a=authors[authors.length-1-(ctx.raw.y||0)]||'';
+            return `${a} — Year: ${ctx.raw.x}, Count: ${ctx.raw.cnt||0}, TC: ${ctx.raw.tc||0}`;
+          }
+          return '';
+        }}}
+      },
+      scales:{
+        x:{type:'linear',
+          title:{display:true,text:'Year',font:{size:fs-2,weight:'bold'},color:'#191c1d'},
+          min:yrMin, max:yrMax,
+          ticks:{
+            font:{size:fs-3},
+            stepSize:1,
+            autoSkip:true,
+            maxTicksLimit:Math.min(yrMax-yrMin+1, 30),
+            maxRotation:45,
+            callback:(v)=>Number.isInteger(v)?v:''
+          },
+          grid:{color:'rgba(0,0,0,0.05)'}},
+        y:{type:'linear',title:{display:true,text:'Author',font:{size:fs-2,weight:'bold'},color:'#191c1d'},min:-0.5,max:authors.length-0.5,ticks:{font:{size:Math.max(9,fs-3)},stepSize:1,autoSkip:false,callback:(v)=>{const idx=Math.round(v);return(idx>=0&&idx<authors.length)?authors[idx]:''}},grid:{color:'rgba(0,0,0,0.05)'}}
+      }
+    }
+  });
+
+  // Update legend
+  const szEl=document.getElementById('f2-lg-size');
+  if(szEl)szEl.textContent=`Bubble size: N. Articles per Year (${mnC} – ${mxC})`;
+  const colBar=document.getElementById('f2-lg-col-bar');
+  if(colBar)colBar.style.background=`linear-gradient(to right,${pal.grad[0]},${pal.grad[1]})`;
+  const colLbl=document.getElementById('f2-lg-col-lbl');
+  if(colLbl)colLbl.textContent=`Color: TC per Year (${mnTC} – ${mxTC})`;
+  // Update LEGEND_SPECS for export
+  LEGEND_SPECS['f2-c']=[{grad:pal.grad,label:`TC/Year (${mnTC}–${mxTC})`},{circles:[pal.grad[0],d3.interpolateRgb(pal.grad[0],pal.grad[1])(0.5),pal.grad[1]],label:`N.Articles/Year (${mnC}–${mxC})`}];
+}
+
+// ══════════════════════════════════════════════
+// FIG 3 — INSTITUTIONS
+// ══════════════════════════════════════════════
+function rF3(){
+  if(!APP.data)return;
+  const n=APP.settings.in;
+  const fs=parseInt(document.getElementById('f3-fs').value)||APP.settings.fs;
+  const rh=parseInt(document.getElementById('f3-rh').value)||30;
+  const top=topN(APP.data.inCnt,n);
+  const labels=top.map(([k])=>k.length>42?k.slice(0,40)+'…':k).reverse();
+  const vals=top.map(([,v])=>v).reverse();
+  const mn=Math.min(...vals),mx=Math.max(...vals);
+  const h=Math.max(300,n*rh);
+  const palK=APP.settings.palF3||'blue';
+  document.getElementById('f3-w').style.height=h+'px';
+  dc('f3-c');
+  APP.charts['f3-c']=new Chart(document.getElementById('f3-c'),{
+    type:'bar',
+    data:{labels,datasets:[{label:'Articles',data:vals,backgroundColor:vals.map(v=>palFn(palK,v,mn,mx)),borderRadius:3}]},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:true,position:'top',labels:{font:{size:fs-2},boxWidth:12,padding:8}}},
+      scales:{
+        x:{title:{display:true,text:'Articles',font:{size:fs-2,weight:'bold'}},ticks:{font:{size:fs-3}}},
+        y:{title:{display:true,text:'Institutions',font:{size:fs-2,weight:'bold'}},ticks:{font:{size:fs-3}}}
+      }}
+  });
+  const lg3=document.getElementById('lg3');if(lg3)lg3.style.background=palGrad(palK);
+  syncLegendSpecs();
+}
+
+// ══════════════════════════════════════════════
+// FIG 4 — JOURNALS
+// ══════════════════════════════════════════════
+function rF4(){
+  if(!APP.data)return;
+  const n=APP.settings.jo;
+  const fs=parseInt(document.getElementById('f4-fs').value)||APP.settings.fs;
+  const rh=parseInt(document.getElementById('f4-rh').value)||30;
+  const top=topN(APP.data.soCnt,n);
+  const labels=top.map(([k])=>k.length>52?k.slice(0,50)+'…':k).reverse();
+  const vals=top.map(([,v])=>v).reverse();
+  const mn=Math.min(...vals),mx=Math.max(...vals);
+  const h=Math.max(300,n*rh);
+  const palK=APP.settings.palF4||'blue';
+  document.getElementById('f4-w').style.height=h+'px';
+  dc('f4-c');
+  APP.charts['f4-c']=new Chart(document.getElementById('f4-c'),{
+    type:'bar',
+    data:{labels,datasets:[{label:'Articles',data:vals,backgroundColor:vals.map(v=>palFn(palK,v,mn,mx)),borderRadius:3}]},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:true,position:'top',labels:{font:{size:fs-2},boxWidth:12,padding:8}}},
+      scales:{
+        x:{title:{display:true,text:'Articles',font:{size:fs-2,weight:'bold'}},ticks:{font:{size:fs-3}}},
+        y:{title:{display:true,text:'Sources',font:{size:fs-2,weight:'bold'}},ticks:{font:{size:fs-3}}}
+      }}
+  });
+  const lg4=document.getElementById('lg4');if(lg4)lg4.style.background=palGrad(palK);
+  syncLegendSpecs();
+}
+
+// ══════════════════════════════════════════════
+// FIG 5 — WORLD MAP
+// ══════════════════════════════════════════════
+// Country name → ISO numeric string (3-digit padded)
+const CISO={
+  'United States':['840'],'USA':['840'],'U.S.A.':['840'],'United States Of America':['840'],
+  'China':['156'],"People's Republic Of China":['156'],'Peoples R China':['156'],'PR China':['156'],
+  'Spain':['724'],'Denmark':['208'],'Brazil':['076'],
+  'Australia':['036'],'South Africa':['710'],'Germany':['276'],
+  'France':['250'],'United Kingdom':['826'],'England':['826'],'Scotland':['826'],'Wales':['826'],'UK':['826'],
+  'New Zealand':['554'],'Nigeria':['566'],'Kenya':['404'],
+  'Argentina':['032'],'Sweden':['752'],'Italy':['380'],
+  'Netherlands':['528'],'Poland':['616'],'Russia':['643'],'Russian Federation':['643'],'India':['356'],
+  'Canada':['124'],'Mexico':['484'],'Japan':['392'],'South Korea':['410'],
+  'Republic Of Korea':['410'],'Korea':['410'],'Portugal':['620'],'Chile':['152'],
+  'Ethiopia':['231'],'Colombia':['170'],'Indonesia':['360'],
+  'Pakistan':['586'],'Turkey':['792'],'Turkiye':['792'],'Egypt':['818'],'Morocco':['504'],
+  'Iran':['364'],'Iran Islamic Republic Of':['364'],'Switzerland':['756'],'Belgium':['056'],'Austria':['040'],
+  'Norway':['578'],'Finland':['246'],'Czech Republic':['203'],'Czechia':['203'],
+  'Romania':['642'],'Hungary':['348'],'Greece':['300'],
+  'Malaysia':['458'],'Thailand':['764'],'Vietnam':['704'],'Viet Nam':['704'],
+  'Philippines':['608'],'Taiwan':['158'],'Hong Kong':['344'],
+  'Singapore':['702'],'Israel':['376'],'Saudi Arabia':['682'],
+  'United Arab Emirates':['784'],'UAE':['784'],'Qatar':['634'],
+  'Sudan':['729'],'Tanzania':['834'],'Uganda':['800'],
+  'Cameroon':['120'],'Ghana':['288'],'Zimbabwe':['716'],
+  'Senegal':['686'],'Tunisia':['788'],'Algeria':['012'],
+  'Peru':['604'],'Venezuela':['862'],'Ecuador':['218'],
+  'Bolivia':['068'],'Uruguay':['858'],'Paraguay':['600'],
+  'New Caledonia':['540'],'Papua New Guinea':['598'],
+  'Ivory Coast':['384'],"Cote D'Ivoire":['384'],"Côte D'Ivoire":['384'],
+  'Democratic Republic Of The Congo':['180'],'DR Congo':['180'],'Congo':['178'],
+  'Mozambique':['508'],'Zambia':['894'],'Botswana':['072'],
+  'Namibia':['516'],'Angola':['024'],'Burkina Faso':['854'],
+  'Mali':['466'],'Niger':['562'],'Chad':['148'],'Somalia':['706'],
+  'Malawi':['454'],'Rwanda':['646'],'Burundi':['108'],
+  'Sweden':['752'],'Denmark':['208'],'Finland':['246'],'Iceland':['352'],
+  'Ireland':['372'],'Luxembourg':['442'],'Slovakia':['703'],
+  'Croatia':['191'],'Slovenia':['705'],'Serbia':['688'],'Bulgaria':['100'],
+  'Ukraine':['804'],'Belarus':['112'],'Kazakhstan':['398'],
+  'Uzbekistan':['860'],'Georgia':['268'],'Azerbaijan':['031'],'Armenia':['051'],
+  'Chile':['152'],'Cuba':['192'],'Costa Rica':['188'],'Panama':['591'],
+  'Guatemala':['320'],'Honduras':['340'],'Nicaragua':['558'],'El Salvador':['222'],
+  'Dominican Republic':['214'],'Haiti':['332'],'Jamaica':['388'],'Trinidad And Tobago':['780'],
+  'Bangladesh':['050'],'Sri Lanka':['144'],'Nepal':['524'],'Myanmar':['104'],
+  'Cambodia':['116'],'Laos':['418'],'Mongolia':['496'],
+  'Iraq':['368'],'Jordan':['400'],'Lebanon':['422'],'Syria':['760'],
+  'Kuwait':['414'],'Bahrain':['048'],'Oman':['512'],'Yemen':['887'],
+  'Libya':['434'],'Tunisia':['788'],'Mauritania':['478'],
+  'Gabon':['266'],'Republic Of Congo':['178'],'Central African Republic':['140'],
+};
+
+// Build a lowercase lookup for fast fuzzy matching
+const CISO_LOWER={};
+Object.entries(CISO).forEach(([k,v])=>CISO_LOWER[k.toLowerCase().trim()]=v);
+
+// Normalize and look up a country name → ISO ids array or null
+function lookupCountry(raw){
+  if(!raw)return null;
+  const s=raw.trim();
+  // exact
+  if(CISO[s])return CISO[s];
+  // case-insensitive exact
+  const lo=s.toLowerCase();
+  if(CISO_LOWER[lo])return CISO_LOWER[lo];
+  // contains match
+  for(const [k,ids] of Object.entries(CISO_LOWER)){
+    if(lo===k||lo.endsWith(', '+k)||lo.endsWith(' '+k)||k===lo)return ids;
+  }
+  // partial: any CISO key that is contained in raw or vice versa
+  for(const [k,ids] of Object.entries(CISO_LOWER)){
+    if(lo.includes(k)||k.includes(lo))return ids;
+  }
+  return null;
+}
+
+function buildCID(d){
+  const res={};
+  Object.entries(d).forEach(([cn,cnt])=>{
+    const ids=lookupCountry(cn);
+    if(ids)ids.forEach(id=>res[id]=(res[id]||0)+cnt);
+  });
+  return res;
+}
+
+function buildEdges(pairs,minEdge){
+  const edges=[];
+  Object.entries(pairs).forEach(([key,cnt])=>{
+    if(cnt>=minEdge){
+      const [a,b]=key.split('||');
+      edges.push({a,b,cnt});
+    }
+  });
+  return edges;
+}
+
+let wTopo=null;
+function rF5(){
+  if(!APP.data)return;
+  const minEdge=parseInt(document.getElementById('f5-mc').value)||APP.settings.mc;
+  const cntData=buildCID(APP.data.coCnt);
+  const edges=buildEdges(APP.data.coPairs||{},minEdge);
+  const maxVal=Math.max(1,...Object.values(cntData));
+  const container=document.getElementById('wmc');
+  container.innerHTML='';
+
+  const render=(world)=>{
+    wTopo=world;
+    const w=container.offsetWidth||800,h=Math.round(w*0.48);
+    const svg=d3.select('#wmc').append('svg')
+      .attr('viewBox',`0 0 ${w} ${h}`)
+      .attr('width','100%')
+      .style('background','#dce9f5')
+      .style('border-radius','.45rem');
+
+    const proj=d3.geoNaturalEarth1().scale(w/6.2).translate([w/2,h/2]);
+    const pathGen=d3.geoPath(proj);
+
+    // Color scale: palette-aware D3 sequential scale
+    const D3_INTERP={blue:d3.interpolateBlues,teal:d3.interpolateGreens,purple:d3.interpolatePurples,warm:d3.interpolateOranges};
+    const palK=APP.settings.palF5||'blue';
+    const colSc=d3.scaleSequential([0,maxVal],D3_INTERP[palK]||d3.interpolateBlues);
+    const features=topojson.feature(world,world.objects.countries).features;
+
+    // Graticule (subtle grid)
+    const graticule=d3.geoGraticule()();
+    svg.append('path').datum(graticule).attr('d',pathGen)
+      .attr('fill','none').attr('stroke','rgba(255,255,255,0.15)').attr('stroke-width',0.3);
+
+    // Country fills
+    svg.selectAll('path.country').data(features).join('path')
+      .attr('class','country').attr('d',pathGen)
+      .attr('fill',d=>{
+        const id=String(d.id).padStart(3,'0');
+        const v=cntData[id]||0;
+        if(v>0)return colSc(Math.max(v,maxVal*0.15));// min shade so all publishing countries are visible
+        const PAL_MUTED={blue:'#b8cfe0',teal:'#b2dfdb',purple:'#d8cce8',warm:'#f5dfc0'};
+        return PAL_MUTED[palK]||'#b8cfe0';// non-publishing = muted variant
+      })
+      .attr('stroke','#ffffff').attr('stroke-width',0.5)
+      .on('mouseover',(event,d)=>{
+        const id=String(d.id).padStart(3,'0');const v=cntData[id]||0;
+        const cn=Object.entries(CISO).find(([,ids])=>ids.includes(id));
+        const t=document.getElementById('tt');t.style.display='block';
+        t.innerHTML=`${cn?cn[0]:'Country ID '+id}<br>Publications: ${v}`;
+        t.style.left=(event.clientX+12)+'px';t.style.top=(event.clientY-28)+'px';
+      })
+      .on('mousemove',ev=>{const t=document.getElementById('tt');t.style.left=(ev.clientX+12)+'px';t.style.top=(ev.clientY-28)+'px';})
+      .on('mouseleave',()=>{document.getElementById('tt').style.display='none';});
+
+    // Build centroids lookup
+    const centroids={};
+    features.forEach(d=>{
+      const id=String(d.id).padStart(3,'0');
+      const c=pathGen.centroid(d);
+      if(c&&!isNaN(c[0])&&!isNaN(c[1]))centroids[id]=c;
+    });
+
+    // Draw curved collaboration edges
+    const maxEdge=edges.length?Math.max(...edges.map(e=>e.cnt)):1;
+    let edgesDrawn=0;
+    edges.forEach(edge=>{
+      const idsA=lookupCountry(edge.a);
+      const idsB=lookupCountry(edge.b);
+      if(!idsA||!idsB)return;
+      const cA=centroids[idsA[0]],cB=centroids[idsB[0]];
+      if(!cA||!cB)return;
+      edgesDrawn++;
+      const strength=edge.cnt/maxEdge;
+      const mx=(cA[0]+cB[0])/2,my=(cA[1]+cB[1])/2;
+      const dx=cB[0]-cA[0],dy=cB[1]-cA[1];
+      const dist=Math.sqrt(dx*dx+dy*dy)||1;
+      const offset=dist*0.18;
+      const cpx=mx-dy*(offset/dist),cpy=my+dx*(offset/dist);
+      svg.append('path')
+        .attr('d',`M${cA[0]},${cA[1]} Q${cpx},${cpy} ${cB[0]},${cB[1]}`)
+        .attr('fill','none')
+        .attr('stroke',strength>0.5?'#8b2a12':'#c0392b')
+        .attr('stroke-width',Math.max(0.5,strength*3))
+        .attr('stroke-opacity',Math.max(0.25,strength*0.8))
+        .on('mouseover',(event)=>{
+          const t=document.getElementById('tt');t.style.display='block';
+          t.innerHTML=`${edge.a} ↔ ${edge.b}<br>Collaborations: ${edge.cnt}`;
+          t.style.left=(event.clientX+12)+'px';t.style.top=(event.clientY-28)+'px';
+        })
+        .on('mousemove',ev=>{const t=document.getElementById('tt');t.style.left=(ev.clientX+12)+'px';t.style.top=(ev.clientY-28)+'px';})
+        .on('mouseleave',()=>{document.getElementById('tt').style.display='none';});
+    });
+    // Debug info in SVG title
+    svg.append('title').text(`Country Collaboration Map | ${Object.keys(cntData).length} countries | ${edgesDrawn} edges drawn (min=${minEdge})`);
+
+
+    // Country publication nodes (circles)
+    features.forEach(d=>{
+      const id=String(d.id).padStart(3,'0');const v=cntData[id]||0;
+      if(v>0){
+        const c=centroids[id];if(!c)return;
+        svg.append('circle')
+          .attr('cx',c[0]).attr('cy',c[1])
+          .attr('r',Math.min(Math.sqrt(v)*1.8,22))
+          .attr('fill','none')
+          .attr('stroke','#083a7a')
+          .attr('stroke-width',1.5)
+          .attr('opacity',0.75);
+      }
+    });
+
+    // Debug info
+    const dbg=document.getElementById('map-debug');
+    if(dbg){
+      const cKeys=Object.keys(APP.data.coCnt);
+      const pKeys=Object.keys(APP.data.coPairs||{});
+      dbg.style.display='block';
+      dbg.innerHTML=`📊 Countries extracted from C1: <strong>${cKeys.length}</strong> unique strings | Pairs found: <strong>${pKeys.length}</strong> | Edges drawn (min≥${minEdge}): <strong>${edgesDrawn}</strong> | Countries colored on map: <strong>${Object.keys(cntData).length}</strong>`;
+    }
+
+    // Axis labels
+    svg.append('text').attr('transform',`translate(12,${h/2})rotate(-90)`)
+      .attr('text-anchor','middle').attr('font-size',10).attr('fill','#43474f').text('Latitude');
+    svg.append('text').attr('x',w/2).attr('y',h-4)
+      .attr('text-anchor','middle').attr('font-size',10).attr('fill','#43474f').text('Longitude');
+    // X axis label
+    svg.append('text').attr('x',w/2).attr('y',h-4)
+      .attr('text-anchor','middle').attr('font-size',10).attr('fill','#43474f').text('Longitude');
+  };
+
+  if(wTopo)render(wTopo);
+  else d3.json('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(render).catch(()=>{
+    container.innerHTML='<div style="padding:2rem;text-align:center;font-size:.8rem;color:#43474f">⚠️ Map requires internet to load topology.</div>';
+  });
+  // Update legend gradient after render
+  const lg5=document.getElementById('lg5');if(lg5)lg5.style.background=palGrad(APP.settings.palF5||'blue');
+}
+
+// ══════════════════════════════════════════════
+// FIG 6 — CITED DOCS
+// ══════════════════════════════════════════════
+function rF6(){
+  if(!APP.data)return;
+  const n=APP.settings.dc;
+  const fs=parseInt(document.getElementById('f6-fs').value)||APP.settings.fs;
+  const sorted=[...APP.data.docRecs].sort((a,b)=>b.tc-a.tc).slice(0,n);
+  const labels=sorted.map(d=>d.lbl).reverse();
+  const tcV=sorted.map(d=>d.tc).reverse();
+  const yrV=sorted.map(d=>parseFloat(d.tcy.toFixed(2))).reverse();
+  const nmV=sorted.map(d=>parseFloat(d.tcn.toFixed(2))).reverse();
+  const mnTC=Math.min(...tcV),mxTC=Math.max(...tcV);
+  const mnYr=Math.min(...yrV),mxYr=Math.max(...yrV);
+  const mnNm=Math.min(...nmV),mxNm=Math.max(...nmV);
+  const h=Math.max(300,n*28);
+  ['f6-tcw','f6-yrw','f6-nmw'].forEach(id=>document.getElementById(id).style.height=h+'px');
+  dc('f6-tc');dc('f6-yr');dc('f6-nm');
+  const palA=APP.settings.palF6A||'blue';
+  const palB=APP.settings.palF6B||'warm';
+  const palC=APP.settings.palF6C||'teal';
+
+  // All three panels show Y-axis labels (needed when saved individually)
+  // In combined view the middle/right axes are visually redundant but present
+  const makeOpts=(xLabel,showYLabels)=>({
+    indexAxis:'y',responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{display:true,position:'top',labels:{font:{size:fs-3},boxWidth:12,padding:8}}},
+    scales:{
+      x:{title:{display:true,text:xLabel,font:{size:fs-3,weight:'bold'}},ticks:{font:{size:fs-3}}},
+      y:{
+        title:{display:true,text:'Documents',font:{size:fs-3,weight:'bold'}},
+        ticks:{font:{size:fs-3},display:showYLabels}
+      }
+    }
+  });
+
+  APP.charts['f6-tc']=new Chart(document.getElementById('f6-tc'),{type:'bar',
+    plugins:[panelLbl('A',fs)],
+    data:{labels,datasets:[{label:'Total Citations',data:tcV,backgroundColor:tcV.map(v=>palFn(palA,v,mnTC,mxTC)),borderRadius:2}]},
+    options:makeOpts('Total Citations',true)});
+
+  APP.charts['f6-yr']=new Chart(document.getElementById('f6-yr'),{type:'bar',
+    plugins:[panelLbl('B',fs)],
+    data:{labels,datasets:[{label:'TC per Year',data:yrV,backgroundColor:yrV.map(v=>palFn(palB,v,mnYr,mxYr)),borderRadius:2}]},
+    options:makeOpts('TC per Year',true)});
+
+  APP.charts['f6-nm']=new Chart(document.getElementById('f6-nm'),{type:'bar',
+    plugins:[panelLbl('C',fs)],
+    data:{labels,datasets:[{label:'Normalized TC',data:nmV,backgroundColor:nmV.map(v=>palFn(palC,v,mnNm,mxNm)),borderRadius:2}]},
+    options:makeOpts('Normalized TC',true)});
+
+  // Update legend gradients
+  const lg6a=document.getElementById('lg6a');if(lg6a)lg6a.style.background=palGrad(palA);
+  const lg6b=document.getElementById('lg6b');if(lg6b)lg6b.style.background=palGrad(palB);
+  const lg6c=document.getElementById('lg6c');if(lg6c)lg6c.style.background=palGrad(palC);
+  syncLegendSpecs();
+}
+
+// ══════════════════════════════════════════════
+// EXPORT FUNCTIONS
+// ══════════════════════════════════════════════
+function getDPI(){const v=parseInt(document.getElementById('s-dpi').value)||3;return DPI_MAP[v]||3.125;}
+function getFmt(){return document.getElementById('s-fmt').value||'png';}
+
+const LEGEND_SPECS={
+  'f0-a':[{line:'#444444',label:'Annual Publications (left axis)'},{line:'#c0392b',label:'Cumulative Publications (right axis)'}],
+  'f0-b':[{colored_boxes:['#9ad1a9','#4db6e5','#13677b','#a679ff'],box_labels:['1990s','2000s','2010s','2020s'],label:'Decade colors'}],
+  'f1-l':[{grad:['#c6dbef','#084594'],label:'Color: N. Articles (low → high)'}],
+  'f1-r':[{grad:['#ffe0b2','#bf360c'],label:'Color: Articles Fractionalized (low → high)'}],
+  'f2-c':[{grad:['#fcbba1','#cb181d'],label:'Color: TC per Year (low → high)'},{circles:['#c6dbef','#6baed6','#2171b5'],label:'Bubble size: N. Articles/Year'}],
+  'f3-c':[{grad:['#c6dbef','#084594'],label:'Color: N. Articles (low → high)'}],
+  'f4-c':[{grad:['#c6dbef','#084594'],label:'Color: N. Articles (low → high)'}],
+  'f6-tc':[{grad:['#c6dbef','#084594'],label:'Color: Total Citations (low → high)'}],
+  'f6-yr':[{grad:['#ffe0b2','#bf360c'],label:'Color: TC per Year (low → high)'}],
+  'f6-nm':[{grad:['#c8e6c9','#1b5e20'],label:'Color: Normalized TC (low → high)'}],
+};
+
+// Helper: get lo/hi stops from a palette key
+function palStops(key){const p=PAL[key]||PAL.blue;return[p.lo,p.hi];}
+
+// Sync LEGEND_SPECS gradients to current palette selections (called after every render)
+function syncLegendSpecs(){
+  const p1l=palStops(APP.settings.palF1A||'blue');
+  const p1r=palStops(APP.settings.palF1B||'warm');
+  const p3 =palStops(APP.settings.palF3||'blue');
+  const p4 =palStops(APP.settings.palF4||'blue');
+  const p6a=palStops(APP.settings.palF6A||'blue');
+  const p6b=palStops(APP.settings.palF6B||'warm');
+  const p6c=palStops(APP.settings.palF6C||'teal');
+  LEGEND_SPECS['f1-l']=[{grad:p1l,label:'Color: N. Articles (low → high)'}];
+  LEGEND_SPECS['f1-r']=[{grad:p1r,label:'Color: Articles Fractionalized (low → high)'}];
+  LEGEND_SPECS['f3-c']=[{grad:p3, label:'Color: N. Articles (low → high)'}];
+  LEGEND_SPECS['f4-c']=[{grad:p4, label:'Color: N. Articles (low → high)'}];
+  LEGEND_SPECS['f6-tc']=[{grad:p6a,label:'Color: Total Citations (low → high)'}];
+  LEGEND_SPECS['f6-yr']=[{grad:p6b,label:'Color: TC per Year (low → high)'}];
+  LEGEND_SPECS['f6-nm']=[{grad:p6c,label:'Color: Normalized TC (low → high)'}];
+  // F0 boxplot: update colored_boxes from current palette stops spread across decades
+  const p0b=APP.settings.palF0B||'blue';
+  const pp=PAL[p0b]||PAL.blue;
+  // generate 4 representative colors across the palette range
+  const t=[0.15,0.38,0.62,0.85].map(t=>palFn(p0b,t,0,1));
+  LEGEND_SPECS['f0-b']=[{colored_boxes:t,box_labels:['Early','Mid-early','Mid-late','Recent'],label:'Decade palette'}];
+}
+
+function drawLegend(ctx,specs,x,y,maxW,fs){
+  if(!specs||!specs.length)return 0;
+  const BAR_W=90,BAR_H=11,PAD=8,LINE_W=22,BOX=11;
+  let cx=x;
+  ctx.save();ctx.textBaseline='middle';ctx.font=`${Math.max(9,fs-2)}px Inter,Arial,sans-serif`;
+  specs.forEach(spec=>{
+    if(spec.grad){
+      const grd=ctx.createLinearGradient(cx,0,cx+BAR_W,0);
+      grd.addColorStop(0,spec.grad[0]);grd.addColorStop(1,spec.grad[1]);
+      ctx.fillStyle=grd;
+      ctx.beginPath();if(ctx.roundRect)ctx.roundRect(cx,y,BAR_W,BAR_H,3);else ctx.rect(cx,y,BAR_W,BAR_H);
+      ctx.fill();ctx.strokeStyle='rgba(0,0,0,0.2)';ctx.lineWidth=0.5;ctx.stroke();
+      cx+=BAR_W+4;
+    } else if(spec.line){
+      ctx.strokeStyle=spec.line;ctx.lineWidth=3;
+      ctx.beginPath();ctx.moveTo(cx,y+BAR_H/2);ctx.lineTo(cx+LINE_W,y+BAR_H/2);ctx.stroke();
+      if(spec.line!=='#c0392b'){
+        ctx.fillStyle=spec.line;ctx.beginPath();ctx.arc(cx+LINE_W/2,y+BAR_H/2,3.5,0,2*Math.PI);ctx.fill();
+      }
+      ctx.lineWidth=1;cx+=LINE_W+4;
+    } else if(spec.circles){
+      [5,8,12].forEach((r,i)=>{
+        ctx.beginPath();ctx.arc(cx+r,y+BAR_H/2,r,0,2*Math.PI);
+        ctx.fillStyle=spec.circles[i]||'#999';ctx.fill();cx+=r*2+3;
+      });
+      cx+=4;
+    } else if(spec.node_circle){
+      const r=7;
+      ctx.beginPath();ctx.arc(cx+r,y+BAR_H/2,r,0,2*Math.PI);
+      ctx.fillStyle='none';ctx.strokeStyle=spec.node_circle;ctx.lineWidth=1.8;ctx.stroke();
+      cx+=r*2+5;
+    } else if(spec.colored_boxes){
+      (spec.colored_boxes||[]).forEach((col,i)=>{
+        ctx.fillStyle=col;ctx.fillRect(cx,y+(BAR_H-BOX)/2,BOX,BOX);cx+=BOX+2;
+        ctx.fillStyle='#43474f';const lbl=(spec.box_labels||[])[i]||'';
+        ctx.fillText(lbl,cx,y+BAR_H/2);cx+=ctx.measureText(lbl).width+PAD;
+      });
+      ctx.restore();ctx.save();ctx.textBaseline='middle';ctx.font=`${Math.max(9,fs-2)}px Inter,Arial,sans-serif`;
+      return;
+    }
+    ctx.fillStyle='#43474f';ctx.fillText(spec.label,cx,y+BAR_H/2);
+    cx+=ctx.measureText(spec.label).width+PAD*2;
+  });
+  ctx.restore();
+  return BAR_H+PAD+4;
+}
+
+function addLegendToCanvas(srcCanvas,specs,fs){
+  if(!specs||!specs.length)return srcCanvas;
+  const legH=Math.ceil(specs.length/2)*(fs+20)+20;
+  const off=document.createElement('canvas');
+  off.width=srcCanvas.width;off.height=srcCanvas.height+legH;
+  const ctx=off.getContext('2d');
+  ctx.fillStyle='#ffffff';ctx.fillRect(0,0,off.width,off.height);
+  ctx.drawImage(srcCanvas,0,0);
+  ctx.strokeStyle='rgba(0,0,0,0.08)';ctx.lineWidth=0.5;
+  ctx.beginPath();ctx.moveTo(10,srcCanvas.height+5);ctx.lineTo(srcCanvas.width-10,srcCanvas.height+5);ctx.stroke();
+  let ly=srcCanvas.height+12;
+  for(let i=0;i<specs.length;i+=2){
+    drawLegend(ctx,specs.slice(i,i+2),14,ly,srcCanvas.width-28,fs);
+    ly+=fs+20;
+  }
+  return off;
+}
+
+function xc(canvasId,filename){
+  const canvas=document.getElementById(canvasId);
+  if(!canvas){alert('Figure not found. Generate figures first.');return;}
+  const dpi=getDPI(),fmt=getFmt(),mime=fmt==='jpeg'?'image/jpeg':'image/png';
+  const specs=LEGEND_SPECS[canvasId]||[];
+  const fs=APP.settings.fs||14;
+  const withLegend=addLegendToCanvas(canvas,specs,fs);
+  const off=document.createElement('canvas');
+  off.width=Math.round(withLegend.width*dpi);
+  off.height=Math.round(withLegend.height*dpi);
+  const ctx=off.getContext('2d');
+  ctx.scale(dpi,dpi);ctx.fillStyle='#ffffff';ctx.fillRect(0,0,withLegend.width,withLegend.height);
+  ctx.drawImage(withLegend,0,0);
+  const link=document.createElement('a');
+  link.download=filename+'_'+Math.round(dpi*96)+'dpi.'+fmt;
+  link.href=off.toDataURL(mime,0.96);link.click();
+}
+
+// SVG export — real vector, reads chart computed data directly
+function xSVGChart(canvasId, filename){
+  const chartInst=APP.charts[canvasId];
+  if(!chartInst){alert('Figure not found. Generate figures first.');return;}
+  const canvas=document.getElementById(canvasId);
+  if(!canvas){alert('Canvas not found.');return;}
+  const W=canvas.offsetWidth||canvas.width||800;
+  const H=canvas.offsetHeight||canvas.height||600;
+  const specs=LEGEND_SPECS[canvasId]||[];
+  const fs=APP.settings.fs||14;
+  const legH=specs.length>0?Math.ceil(specs.length/2)*(fs+20)+22:0;
+  const totalH=H+legH;
+
+  const result=renderChartToSVG(chartInst, W, H);
+  const svgEl=result.getSVG();
+  svgEl.setAttribute('height',totalH);
+  svgEl.setAttribute('viewBox',`0 0 ${W} ${totalH}`);
+
+  // Extend white bg
+  const bgExt=document.createElementNS('http://www.w3.org/2000/svg','rect');
+  bgExt.setAttribute('x',0);bgExt.setAttribute('y',H);
+  bgExt.setAttribute('width',W);bgExt.setAttribute('height',legH);
+  bgExt.setAttribute('fill','white');svgEl.appendChild(bgExt);
+
+  const titleEl=document.createElementNS('http://www.w3.org/2000/svg','title');
+  titleEl.textContent=filename;svgEl.insertBefore(titleEl,svgEl.firstChild);
+  if(specs.length>0)appendLegendSVG(svgEl,specs,H,W,fs);
+
+  const svgStr=new XMLSerializer().serializeToString(svgEl);
+  const blob=new Blob([svgStr],{type:'image/svg+xml;charset=utf-8'});
+  const link=document.createElement('a');
+  link.download=filename+'.svg';
+  link.href=URL.createObjectURL(blob);link.click();
+  setTimeout(()=>URL.revokeObjectURL(link.href),5000);
+}
+
+// Horizontal merge — Fig1, Fig6 combined. hideYAfterFirst=true for Fig6
+// Build the merged canvas (horizontal) and return it — shared by PNG and SVG paths
+function buildMergedCanvas(canvasIds, hideYAfterFirst){
+  if(hideYAfterFirst){
+    canvasIds.slice(1).forEach(id=>{
+      const ch=APP.charts[id];
+      if(ch){ch.options.scales.y.ticks.display=false;ch.options.scales.y.title.display=false;ch.update('none');}
+    });
+  }
+  const canvases=canvasIds.map(id=>document.getElementById(id)).filter(Boolean);
+  if(!canvases.length){
+    if(hideYAfterFirst)restoreY(canvasIds);
+    return null;
+  }
+  const dpi=3, PAD=12, fs=APP.settings.fs||14;
+  const maxH=Math.max(...canvases.map(c=>c.height));
+  const totalW=canvases.reduce((s,c)=>s+c.width,0)+(canvases.length-1)*PAD;
+  const allSpecs=canvasIds.flatMap(id=>LEGEND_SPECS[id]||[]);
+  const legH=allSpecs.length>0?Math.ceil(allSpecs.length/3)*(fs+20)+20:0;
+  const off=document.createElement('canvas');
+  off.width=Math.round(totalW*dpi);off.height=Math.round((maxH+legH)*dpi);
+  const ctx=off.getContext('2d');
+  ctx.scale(dpi,dpi);ctx.fillStyle='#ffffff';ctx.fillRect(0,0,totalW,maxH+legH);
+  let x=0;
+  canvases.forEach((c,i)=>{ctx.drawImage(c,x,Math.round((maxH-c.height)/2));x+=c.width+(i<canvases.length-1?PAD:0);});
+  if(allSpecs.length>0){
+    ctx.strokeStyle='rgba(0,0,0,0.08)';ctx.lineWidth=0.5;
+    ctx.beginPath();ctx.moveTo(10,maxH+5);ctx.lineTo(totalW-10,maxH+5);ctx.stroke();
+    let ly=maxH+12;
+    for(let i=0;i<allSpecs.length;i+=3){drawLegend(ctx,allSpecs.slice(i,i+3),14,ly,totalW-28,fs);ly+=fs+20;}
+  }
+  if(hideYAfterFirst)restoreY(canvasIds);
+  return {canvas:off, W:totalW, H:maxH+legH};
+}
+
+function restoreY(canvasIds){
+  canvasIds.slice(1).forEach(id=>{
+    const ch=APP.charts[id];
+    if(ch){ch.options.scales.y.ticks.display=true;ch.options.scales.y.title.display=true;ch.update('none');}
+  });
+}
+
+// Build the merged canvas (vertical) — shared by PNG and SVG paths
+function buildMergedVCanvas(canvasIds){
+  const canvases=canvasIds.map(id=>document.getElementById(id)).filter(Boolean);
+  if(!canvases.length)return null;
+  const dpi=3, PAD=16, fs=APP.settings.fs||14;
+  const maxW=Math.max(...canvases.map(c=>c.width));
+  const totalH=canvases.reduce((s,c)=>s+c.height,0)+(canvases.length-1)*PAD;
+  const allSpecs=canvasIds.flatMap(id=>LEGEND_SPECS[id]||[]);
+  const legH=allSpecs.length>0?Math.ceil(allSpecs.length/2)*(fs+20)+20:0;
+  const off=document.createElement('canvas');
+  off.width=Math.round(maxW*dpi);off.height=Math.round((totalH+legH)*dpi);
+  const ctx=off.getContext('2d');
+  ctx.scale(dpi,dpi);ctx.fillStyle='#ffffff';ctx.fillRect(0,0,maxW,totalH+legH);
+  let y=0;
+  canvases.forEach((c,i)=>{
+    const xOff=Math.round((maxW-c.width)/2);
+    ctx.drawImage(c,xOff,y);
+    ctx.font=`bold ${fs+2}px Inter,Arial,sans-serif`;ctx.fillStyle='#222';ctx.textBaseline='top';
+    ctx.fillText(String.fromCharCode(65+i),xOff+8,y+8);
+    y+=c.height+(i<canvases.length-1?PAD:0);
+  });
+  if(allSpecs.length>0){
+    ctx.strokeStyle='rgba(0,0,0,0.08)';ctx.lineWidth=0.5;
+    ctx.beginPath();ctx.moveTo(10,totalH+5);ctx.lineTo(maxW-10,totalH+5);ctx.stroke();
+    let ly=totalH+12;
+    for(let i=0;i<allSpecs.length;i+=2){drawLegend(ctx,allSpecs.slice(i,i+2),14,ly,maxW-28,fs);ly+=fs+20;}
+  }
+  return {canvas:off, W:maxW, H:totalH+legH};
+}
+
+// Horizontal merge — PNG
+function xMerge(canvasIds, filename, hideYAfterFirst){
+  const result=buildMergedCanvas(canvasIds,hideYAfterFirst);
+  if(!result){alert('No figures found. Generate figures first.');return;}
+  const dpi=getDPI(), fmt=getFmt(), mime=fmt==='jpeg'?'image/jpeg':'image/png';
+  // Scale from 3× build canvas to selected DPI
+  const scale=dpi/3;
+  const out=document.createElement('canvas');
+  out.width=Math.round(result.canvas.width*scale);
+  out.height=Math.round(result.canvas.height*scale);
+  const ctx=out.getContext('2d');
+  ctx.drawImage(result.canvas,0,0,out.width,out.height);
+  const link=document.createElement('a');
+  link.download=filename+'_'+Math.round(dpi*96)+'dpi.'+fmt;
+  link.href=out.toDataURL(mime,0.96);link.click();
+}
+
+// Horizontal merge — SVG
+// Horizontal combined SVG — real vector
+function xMergeSVG(canvasIds, filename, hideYAfterFirst){
+  if(hideYAfterFirst){
+    canvasIds.slice(1).forEach(id=>{
+      const ch=APP.charts[id];
+      if(ch){ch.options.scales.y.ticks.display=false;ch.options.scales.y.title.display=false;ch.update('none');}
+    });
+  }
+  const PAD=12, fs=APP.settings.fs||14;
+  const ns='http://www.w3.org/2000/svg';
+
+  const parts=canvasIds.map(id=>{
+    const ch=APP.charts[id]; const cv=document.getElementById(id);
+    if(!ch||!cv)return null;
+    const c2s=renderChartToSVG(ch, cv.width, cv.height);
+    return {svg:c2s.getSVG(), W:cv.width, H:cv.height};
+  }).filter(Boolean);
+
+  if(hideYAfterFirst){
+    canvasIds.slice(1).forEach(id=>{
+      const ch=APP.charts[id];
+      if(ch){ch.options.scales.y.ticks.display=true;ch.options.scales.y.title.display=true;ch.update('none');}
+    });
+  }
+  if(!parts.length){alert('No figures found. Generate figures first.');return;}
+
+  const totalW=parts.reduce((s,p)=>s+p.W,0)+(parts.length-1)*PAD;
+  const maxH=Math.max(...parts.map(p=>p.H));
+  const allSpecs=canvasIds.flatMap(id=>LEGEND_SPECS[id]||[]);
+  const legH=allSpecs.length>0?Math.ceil(allSpecs.length/3)*(fs+20)+22:0;
+  const totalH=maxH+legH;
+
+  const out=document.createElementNS(ns,'svg');
+  out.setAttribute('xmlns',ns); out.setAttribute('xmlns:xlink','http://www.w3.org/1999/xlink');
+  out.setAttribute('width',totalW); out.setAttribute('height',totalH);
+  out.setAttribute('viewBox',`0 0 ${totalW} ${totalH}`);
+  const titleEl=document.createElementNS(ns,'title'); titleEl.textContent=filename; out.appendChild(titleEl);
+  const bg=document.createElementNS(ns,'rect'); bg.setAttribute('width',totalW); bg.setAttribute('height',totalH); bg.setAttribute('fill','white'); out.appendChild(bg);
+
+  // Merge defs from all parts
+  const outDefs=document.createElementNS(ns,'defs'); out.appendChild(outDefs);
+  let x=0;
+  parts.forEach((part,i)=>{
+    const yOff=Math.round((maxH-part.H)/2);
+    // Copy defs
+    const partDefs=part.svg.querySelector('defs');
+    if(partDefs)Array.from(partDefs.childNodes).forEach(n=>outDefs.appendChild(n.cloneNode(true)));
+    // Wrap all non-defs children in a translated group
+    const g=document.createElementNS(ns,'g');
+    g.setAttribute('transform',`translate(${x},${yOff})`);
+    Array.from(part.svg.childNodes).forEach(n=>{
+      if(n.tagName!=='defs'&&n.tagName!=='title')g.appendChild(n.cloneNode(true));
+    });
+    out.appendChild(g);
+    x+=part.W+(i<parts.length-1?PAD:0);
+  });
+  if(allSpecs.length>0)appendLegendSVG(out, allSpecs, maxH, totalW, fs);
+
+  const svgStr=new XMLSerializer().serializeToString(out);
+  const blob=new Blob([svgStr],{type:'image/svg+xml;charset=utf-8'});
+  const link=document.createElement('a'); link.download=filename+'.svg';
+  link.href=URL.createObjectURL(blob); link.click();
+  setTimeout(()=>URL.revokeObjectURL(link.href),5000);
+}
+
+// ─── Boxplot exports (Panel B) ───
+function xBoxplotSVG(filename){
+  const svgEl=document.getElementById('f0-b-svg');
+  if(!svgEl){alert('Boxplot not found. Generate figures first.');return;}
+  const svgStr=new XMLSerializer().serializeToString(svgEl);
+  const blob=new Blob([svgStr],{type:'image/svg+xml;charset=utf-8'});
+  const link=document.createElement('a');link.download=filename+'.svg';
+  link.href=URL.createObjectURL(blob);link.click();
+  setTimeout(()=>URL.revokeObjectURL(link.href),5000);
+}
+
+function xBoxplotPNG(filename){
+  const svgEl=document.getElementById('f0-b-svg');
+  if(!svgEl){alert('Boxplot not found. Generate figures first.');return;}
+  const dpi=getDPI(),fmt=getFmt(),mime=fmt==='jpeg'?'image/jpeg':'image/png';
+  const W=parseInt(svgEl.getAttribute('width'))||svgEl.clientWidth||900;
+  const H=parseInt(svgEl.getAttribute('height'))||svgEl.clientHeight||280;
+  const svgStr=new XMLSerializer().serializeToString(svgEl);
+  const blob=new Blob([svgStr],{type:'image/svg+xml;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const img=new Image();
+  img.onload=()=>{
+    const off=document.createElement('canvas');
+    off.width=Math.round(W*dpi);off.height=Math.round(H*dpi);
+    const ctx=off.getContext('2d');ctx.scale(dpi,dpi);
+    ctx.fillStyle='white';ctx.fillRect(0,0,W,H);
+    ctx.drawImage(img,0,0,W,H);
+    const link=document.createElement('a');
+    link.download=filename+'_'+Math.round(dpi*96)+'dpi.'+fmt;
+    link.href=off.toDataURL(mime,0.96);link.click();
+    URL.revokeObjectURL(url);
+  };
+  img.onerror=()=>{alert('PNG export failed. Try SVG.');URL.revokeObjectURL(url);};
+  img.src=url;
+}
+
+// Combined: Panel A (canvas) + Panel B (D3 SVG) → PNG
+function xMergeBoxplotV(filename){
+  const cvA=document.getElementById('f0-a');
+  const svgB=document.getElementById('f0-b-svg');
+  if(!cvA||!svgB){alert('Generate figures first.');return;}
+  const dpi=getDPI(),fmt=getFmt(),mime=fmt==='jpeg'?'image/jpeg':'image/png';
+  const WA=cvA.offsetWidth||900,HA=cvA.offsetHeight||260;
+  const WB=parseInt(svgB.getAttribute('width'))||svgB.clientWidth||900;
+  const HB=parseInt(svgB.getAttribute('height'))||svgB.clientHeight||280;
+  const PAD=16,maxW=Math.max(WA,WB),totalH=HA+PAD+HB;
+  const svgStr=new XMLSerializer().serializeToString(svgB);
+  const blob=new Blob([svgStr],{type:'image/svg+xml;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const imgB=new Image();
+  imgB.onload=()=>{
+    const out=document.createElement('canvas');
+    out.width=Math.round(maxW*dpi);out.height=Math.round(totalH*dpi);
+    const ctx=out.getContext('2d');ctx.scale(dpi,dpi);
+    ctx.fillStyle='white';ctx.fillRect(0,0,maxW,totalH);
+    // Panel A label
+    ctx.font=`bold ${14}px Inter,Arial,sans-serif`;ctx.fillStyle='#222';
+    ctx.fillText('A',8,16);
+    ctx.drawImage(cvA,Math.round((maxW-WA)/2),0,WA,HA);
+    // Panel B label
+    ctx.fillText('B',8,HA+PAD+16);
+    ctx.drawImage(imgB,Math.round((maxW-WB)/2),HA+PAD,WB,HB);
+    const link=document.createElement('a');
+    link.download=filename+'_'+Math.round(dpi*96)+'dpi.'+fmt;
+    link.href=out.toDataURL(mime,0.96);link.click();
+    URL.revokeObjectURL(url);
+  };
+  imgB.onerror=()=>{alert('Combined PNG export failed.');URL.revokeObjectURL(url);};
+  imgB.src=url;
+}
+
+// Combined: Panel A + Panel B → SVG
+function xMergeBoxplotVSVG(filename){
+  const cvA=document.getElementById('f0-a');
+  const svgB=document.getElementById('f0-b-svg');
+  if(!cvA||!svgB){alert('Generate figures first.');return;}
+  const ns='http://www.w3.org/2000/svg';
+  const WA=cvA.offsetWidth||900,HA=cvA.offsetHeight||260;
+  const WB=parseInt(svgB.getAttribute('width'))||svgB.clientWidth||900;
+  const HB=parseInt(svgB.getAttribute('height'))||svgB.clientHeight||280;
+  const PAD=16,maxW=Math.max(WA,WB),totalH=HA+PAD+HB;
+  const c2s=renderChartToSVG(APP.charts['f0-a'],WA,HA);
+  const svgA=c2s?c2s.getSVG():null;
+
+  const out=document.createElementNS(ns,'svg');
+  out.setAttribute('xmlns',ns);out.setAttribute('xmlns:xlink','http://www.w3.org/1999/xlink');
+  out.setAttribute('width',maxW);out.setAttribute('height',totalH);
+  out.setAttribute('viewBox',`0 0 ${maxW} ${totalH}`);
+  const bg=document.createElementNS(ns,'rect');bg.setAttribute('width',maxW);bg.setAttribute('height',totalH);bg.setAttribute('fill','white');out.appendChild(bg);
+
+  // Panel A
+  if(svgA){
+    const gA=document.createElementNS(ns,'g');
+    gA.setAttribute('transform',`translate(${Math.round((maxW-WA)/2)},0)`);
+    Array.from(svgA.childNodes).forEach(n=>{if(n.tagName!=='title')gA.appendChild(n.cloneNode(true));});
+    out.appendChild(gA);
+  } else {
+    // fallback: embed canvas as image
+    const imgData=cvA.toDataURL('image/png');
+    const im=document.createElementNS(ns,'image');
+    im.setAttribute('x',Math.round((maxW-WA)/2));im.setAttribute('y',0);
+    im.setAttribute('width',WA);im.setAttribute('height',HA);
+    im.setAttribute('href',imgData);out.appendChild(im);
+  }
+  const lblA=document.createElementNS(ns,'text');
+  lblA.setAttribute('x',8);lblA.setAttribute('y',18);
+  lblA.setAttribute('font-size',16);lblA.setAttribute('font-weight','bold');
+  lblA.setAttribute('font-family','Inter,Arial,sans-serif');lblA.setAttribute('fill','#222');
+  lblA.textContent='A';out.appendChild(lblA);
+
+  // Panel B
+  const gB=document.createElementNS(ns,'g');
+  gB.setAttribute('transform',`translate(${Math.round((maxW-WB)/2)},${HA+PAD})`);
+  Array.from(svgB.childNodes).forEach(n=>{if(n.tagName!=='title')gB.appendChild(n.cloneNode(true));});
+  out.appendChild(gB);
+  const lblB=document.createElementNS(ns,'text');
+  lblB.setAttribute('x',8);lblB.setAttribute('y',HA+PAD+18);
+  lblB.setAttribute('font-size',16);lblB.setAttribute('font-weight','bold');
+  lblB.setAttribute('font-family','Inter,Arial,sans-serif');lblB.setAttribute('fill','#222');
+  lblB.textContent='B';out.appendChild(lblB);
+
+  const svgStr=new XMLSerializer().serializeToString(out);
+  const blob=new Blob([svgStr],{type:'image/svg+xml;charset=utf-8'});
+  const link=document.createElement('a');link.download=filename+'.svg';
+  link.href=URL.createObjectURL(blob);link.click();
+  setTimeout(()=>URL.revokeObjectURL(link.href),5000);
+}
+
+// Vertical merge — PNG
+function xMergeV(canvasIds, filename){
+  const result=buildMergedVCanvas(canvasIds);
+  if(!result){alert('No figures found. Generate figures first.');return;}
+  const dpi=getDPI(), fmt=getFmt(), mime=fmt==='jpeg'?'image/jpeg':'image/png';
+  const scale=dpi/3;
+  const out=document.createElement('canvas');
+  out.width=Math.round(result.canvas.width*scale);
+  out.height=Math.round(result.canvas.height*scale);
+  const ctx=out.getContext('2d');
+  ctx.drawImage(result.canvas,0,0,out.width,out.height);
+  const link=document.createElement('a');
+  link.download=filename+'_'+Math.round(dpi*96)+'dpi.'+fmt;
+  link.href=out.toDataURL(mime,0.96);link.click();
+}
+
+// Vertical combined SVG — real vector
+function xMergeVSVG(canvasIds, filename){
+  const PAD=16, fs=APP.settings.fs||14;
+  const ns='http://www.w3.org/2000/svg';
+
+  const parts=canvasIds.map(id=>{
+    const ch=APP.charts[id]; const cv=document.getElementById(id);
+    if(!ch||!cv)return null;
+    const c2s=renderChartToSVG(ch, cv.width, cv.height);
+    return {svg:c2s.getSVG(), W:cv.width, H:cv.height};
+  }).filter(Boolean);
+
+  if(!parts.length){alert('No figures found. Generate figures first.');return;}
+
+  const maxW=Math.max(...parts.map(p=>p.W));
+  const totalH=parts.reduce((s,p)=>s+p.H,0)+(parts.length-1)*PAD;
+  const allSpecs=canvasIds.flatMap(id=>LEGEND_SPECS[id]||[]);
+  const legH=allSpecs.length>0?Math.ceil(allSpecs.length/2)*(fs+20)+22:0;
+  const fullH=totalH+legH;
+
+  const out=document.createElementNS(ns,'svg');
+  out.setAttribute('xmlns',ns); out.setAttribute('xmlns:xlink','http://www.w3.org/1999/xlink');
+  out.setAttribute('width',maxW); out.setAttribute('height',fullH);
+  out.setAttribute('viewBox',`0 0 ${maxW} ${fullH}`);
+  const titleEl=document.createElementNS(ns,'title'); titleEl.textContent=filename; out.appendChild(titleEl);
+  const bg=document.createElementNS(ns,'rect'); bg.setAttribute('width',maxW); bg.setAttribute('height',fullH); bg.setAttribute('fill','white'); out.appendChild(bg);
+
+  const outDefs=document.createElementNS(ns,'defs'); out.appendChild(outDefs);
+  let y=0;
+  parts.forEach((part,i)=>{
+    const xOff=Math.round((maxW-part.W)/2);
+    const partDefs=part.svg.querySelector('defs');
+    if(partDefs)Array.from(partDefs.childNodes).forEach(n=>outDefs.appendChild(n.cloneNode(true)));
+    const g=document.createElementNS(ns,'g');
+    g.setAttribute('transform',`translate(${xOff},${y})`);
+    Array.from(part.svg.childNodes).forEach(n=>{
+      if(n.tagName!=='defs'&&n.tagName!=='title')g.appendChild(n.cloneNode(true));
+    });
+    out.appendChild(g);
+    // Panel label
+    const lbl=document.createElementNS(ns,'text');
+    lbl.setAttribute('x',xOff+8); lbl.setAttribute('y',y+fs+4);
+    lbl.setAttribute('font-size',fs+2); lbl.setAttribute('font-weight','bold');
+    lbl.setAttribute('font-family','Inter,Arial,sans-serif'); lbl.setAttribute('fill','#222');
+    lbl.textContent=String.fromCharCode(65+i);
+    out.appendChild(lbl);
+    y+=part.H+(i<parts.length-1?PAD:0);
+  });
+  if(allSpecs.length>0)appendLegendSVG(out, allSpecs, totalH, maxW, fs);
+
+  const svgStr=new XMLSerializer().serializeToString(out);
+  const blob=new Blob([svgStr],{type:'image/svg+xml;charset=utf-8'});
+  const link=document.createElement('a'); link.download=filename+'.svg';
+  link.href=URL.createObjectURL(blob); link.click();
+  setTimeout(()=>URL.revokeObjectURL(link.href),5000);
+}
+
+function xSVG(){
+  const svg=document.querySelector('#wmc svg');
+  if(!svg){alert('Map not found. Generate figures first.');return;}
+  const blob=new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml'});
+  const link=document.createElement('a');link.download='Fig5_WorldMap.svg';
+  link.href=URL.createObjectURL(blob);link.click();
+}
+
+function xMapPNG(){
+  const svg=document.querySelector('#wmc svg');
+  if(!svg){alert('Map not found. Generate figures first.');return;}
+  const dpi=getDPI(),fmt=getFmt(),mime=fmt==='jpeg'?'image/jpeg':'image/png';
+  const svgW=svg.viewBox.baseVal.width||800,svgH=svg.viewBox.baseVal.height||400;
+  const fs=APP.settings.fs||14,legH=fs+32;
+  const svgStr=new XMLSerializer().serializeToString(svg);
+  const blob=new Blob([svgStr],{type:'image/svg+xml;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const img=new Image();
+  img.onload=()=>{
+    const off=document.createElement('canvas');
+    off.width=Math.round(svgW*dpi);off.height=Math.round((svgH+legH)*dpi);
+    const ctx=off.getContext('2d');ctx.scale(dpi,dpi);
+    ctx.fillStyle='#dce9f5';ctx.fillRect(0,0,svgW,svgH+legH);
+    ctx.drawImage(img,0,0,svgW,svgH);
+    ctx.fillStyle='#ffffff';ctx.fillRect(0,svgH,svgW,legH);
+    ctx.strokeStyle='rgba(0,0,0,0.08)';ctx.lineWidth=0.5;
+    ctx.beginPath();ctx.moveTo(10,svgH+5);ctx.lineTo(svgW-10,svgH+5);ctx.stroke();
+    const mapSpecs=[
+      {grad:['#deebf7','#084594'],label:'Publication intensity (low → high)'},
+      {line:'#c0392b',label:'Collaboration edge (thickness ∝ strength)'},
+      {node_circle:'#083a7a',label:'Node size ∝ publications'}
+    ];
+    drawLegend(ctx,mapSpecs,14,svgH+10,svgW-28,fs);
+    const link=document.createElement('a');
+    link.download='Fig5_WorldMap_'+Math.round(dpi*96)+'dpi.'+fmt;
+    link.href=off.toDataURL(mime,0.96);link.click();
+    URL.revokeObjectURL(url);
+  };
+  img.onerror=()=>{alert('PNG export failed. Try SVG.');URL.revokeObjectURL(url);};
+  img.src=url;
+}
+// ══════════════════════════════════════════════
+// PRISMA FLOW DIAGRAM
+// ══════════════════════════════════════════════
+// ══════════════════════════════════════════════
+// PRISMA FLOW DIAGRAM — v2 (multi-database)
+// ══════════════════════════════════════════════
+let PR_DBS=[];   // [{id,name,query,n}]
+let PR_STEPS=[];  // [{id,desc,phase,n}]
+
+function inp(attrs=''){
+  return `<input ${attrs} style="width:100%;padding:.32rem .5rem;border:1px solid var(--ol);border-radius:.28rem;background:var(--sf-wh);font-size:.75rem;color:var(--ons)"/>`;
+}
+
+// ── Add / remove database ──
+function prAddDB(){
+  const id='prdb'+Date.now();
+  PR_DBS.push({id});
+  const card=document.createElement('div');
+  card.id=id;
+  card.style.cssText='background:var(--sf-wh);border:1.5px solid rgba(19,103,123,.28);border-radius:.55rem;padding:.75rem 1rem;margin-bottom:.45rem';
+  const idx=document.querySelectorAll('#pr-dbs > div').length;
+  const iStyle='width:100%;padding:.35rem .5rem;border:1px solid var(--ol);border-radius:.3rem;background:var(--sf-lo);font-size:.75rem;color:var(--ons)';
+  const lStyle='font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--onsv);display:block;margin-bottom:.28rem';
+  card.innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem">
+      <span style="font-size:.72rem;font-weight:700;color:var(--sec);letter-spacing:.03em">Database ${idx}</span>
+      <button onclick="prRemoveDB('${id}')" style="background:none;border:none;cursor:pointer;color:#c62828;font-size:.72rem;font-weight:600;display:flex;align-items:center;gap:.18rem;padding:.1rem .3rem">✕ Remove</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:.55rem;margin-bottom:.5rem">
+      <div>
+        <label style="${lStyle}">Database Name</label>
+        <input id="${id}-name" type="text" placeholder="e.g. Web of Science, Scopus, PubMed" style="${iStyle}"/>
+      </div>
+      <div>
+        <label style="${lStyle}">Total Records Retrieved</label>
+        <input id="${id}-n" type="number" min="0" value="0" oninput="prUpdateTotals()" style="${iStyle}"/>
+      </div>
+    </div>
+    <div>
+      <label style="${lStyle}">Search Query / Topic</label>
+      <textarea id="${id}-q" rows="3" placeholder='e.g. ("climate change" OR "global warming") AND "biodiversity" AND "conservation"' style="${iStyle};resize:vertical;line-height:1.5;font-family:'Inter',monospace,sans-serif;font-size:.73rem"></textarea>
+    </div>`;
+  document.getElementById('pr-dbs').appendChild(card);
+  prUpdateTotals();
+}
+
+function prRemoveDB(id){
+  PR_DBS=PR_DBS.filter(d=>d.id!==id);
+  const el=document.getElementById(id);if(el)el.remove();
+  prUpdateTotals();
+}
+
+// ── Add / remove filter step ──
+function prAddStep(){
+  const id='prs'+Date.now();
+  PR_STEPS.push({id});
+  const row=document.createElement('div');
+  row.id=id;
+  row.style.cssText='display:grid;grid-template-columns:2fr 1fr 80px auto;gap:.4rem;align-items:center;background:var(--sf-lo);border:1px solid var(--ol);border-radius:.38rem;padding:.4rem .65rem';
+  row.innerHTML=`
+    ${inp(`id="${id}-desc" placeholder="e.g. Time span: 2000–2024 | Document type: Article, Review"`)}
+    <select id="${id}-ph" style="padding:.3rem .4rem;border:1px solid var(--ol);border-radius:.28rem;font-size:.72rem;background:var(--sf-wh)">
+      <option value="Screening">Screening</option>
+      <option value="Eligibility">Eligibility</option>
+    </select>
+    ${inp(`id="${id}-n" type="number" min="0" value="0" oninput="prUpdateTotals()"`)}
+    <button onclick="prRemoveStep('${id}')" style="background:none;border:none;cursor:pointer;color:#c62828;font-size:1rem;padding:.1rem .25rem" title="Remove">✕</button>`;
+  document.getElementById('pr-steps').appendChild(row);
+  prUpdateTotals();
+}
+
+function prRemoveStep(id){
+  PR_STEPS=PR_STEPS.filter(s=>s.id!==id);
+  const el=document.getElementById(id);if(el)el.remove();
+  prUpdateTotals();
+}
+
+// ── Live total calculator ──
+function prUpdateTotals(){
+  // Sum databases
+  let dbTotal=0;
+  document.querySelectorAll('[id^="prdb"][id$="-n"]').forEach(el=>dbTotal+=parseInt(el.value)||0);
+  const otherN=parseInt(document.getElementById('pr-other-n')?.value)||0;
+  const grand=dbTotal+otherN;
+  const tlbl=document.getElementById('pr-total-lbl');
+  if(tlbl)tlbl.textContent=grand.toLocaleString();
+
+  // After deduplication
+  const dupl=parseInt(document.getElementById('pr-dupl')?.value)||0;
+  const afterDupl=Math.max(0,grand-dupl);
+  const adlbl=document.getElementById('pr-after-dupl');
+  if(adlbl)adlbl.textContent=afterDupl.toLocaleString();
+
+  // Final (last step N or afterDupl)
+  const stepNs=document.querySelectorAll('[id^="prs"][id$="-n"]');
+  let finalN=afterDupl;
+  if(stepNs.length>0){
+    const last=stepNs[stepNs.length-1];
+    finalN=parseInt(last.value)||0;
+  }
+  const flbl=document.getElementById('pr-final-lbl');
+  if(flbl)flbl.textContent=finalN.toLocaleString();
+}
+
+// ── Text wrap helper (returns array of lines) ──
+function prWrap(text, maxChars){
+  if(!text)return[];
+  const words=text.split(/\s+/).filter(Boolean);
+  const lines=[];let cur='';
+  words.forEach(w=>{
+    const test=(cur?cur+' ':'')+w;
+    if(test.length>maxChars&&cur){lines.push(cur);cur=w;}
+    else cur=test;
+  });
+  if(cur)lines.push(cur);
+  return lines;
+}
+
+// ══ GENERATE SVG ══
+function genPRISMA(){
+  // Collect databases
+  const dbRows=document.querySelectorAll('#pr-dbs > div');
+  const dbs=[];
+  dbRows.forEach(row=>{
+    const rid=row.id;
+    const name=document.getElementById(rid+'-name')?.value||'Database';
+    const q=document.getElementById(rid+'-q')?.value||'';
+    const n=parseInt(document.getElementById(rid+'-n')?.value)||0;
+    dbs.push({name,q,n});
+  });
+  if(dbs.length===0)dbs.push({name:'Database',q:'(search query)',n:0});
+
+  const otherSrc=document.getElementById('pr-other-src')?.value||'';
+  const otherN=parseInt(document.getElementById('pr-other-n')?.value)||0;
+  const dbTotal=dbs.reduce((s,d)=>s+d.n,0);
+  const grand=dbTotal+otherN;
+  const dupl=parseInt(document.getElementById('pr-dupl')?.value)||0;
+  const afterDupl=Math.max(0,grand-dupl);
+
+  // Collect filter steps
+  const stepRows=document.querySelectorAll('#pr-steps > div');
+  const steps=[];
+  stepRows.forEach(row=>{
+    const rid=row.id;
+    const desc=document.getElementById(rid+'-desc')?.value||'Filter';
+    const phase=document.getElementById(rid+'-ph')?.value||'Screening';
+    const n=parseInt(document.getElementById(rid+'-n')?.value)||0;
+    steps.push({desc,phase,n});
+  });
+  // Compute excluded per step
+  let prev=afterDupl;
+  steps.forEach(s=>{s.excl=Math.max(0,prev-s.n);prev=s.n;});
+  const finalN=steps.length?steps[steps.length-1].n:afterDupl;
+
+  // ── SVG layout constants ──
+  const ns='http://www.w3.org/2000/svg';
+  const LPAD=12, PLBL=78, PG=6;
+  const MBX=LPAD+PLBL+PG;   // main box start X = 96
+  const MBW=310;              // main box width
+  const AGAP=28;
+  const EBX=MBX+MBW+AGAP;   // excl box start X
+  const EBW=178;
+  const SVG_W=EBX+EBW+12;   // ≈ 624
+
+  const BH_DB=62, BH_MAIN=62, BH_INCL=68, ROW_GAP=20;
+  // Phase palette — Identification adapts to selected palette
+  const prPal=APP.settings.palPR||'blue';
+  const PRISMA_IDENT={
+    blue:  {lbl:'#1a56db',bg:'#eff6ff',bdr:'#1e40af'},
+    teal:  {lbl:'#00695c',bg:'#e0f7fa',bdr:'#006064'},
+    purple:{lbl:'#6a0dad',bg:'#f3e8ff',bdr:'#4a235a'},
+    warm:  {lbl:'#c27803',bg:'#fffbeb',bdr:'#92400e'},
+  };
+  const PC={
+    Identification: PRISMA_IDENT[prPal]||PRISMA_IDENT.blue,
+    Screening:     {lbl:'#057a55',bg:'#ecfdf5',bdr:'#065f46'},
+    Eligibility:   {lbl:'#c27803',bg:'#fffbeb',bdr:'#92400e'},
+    Inclusion:     {lbl:'#374151',bg:'#f9fafb',bdr:'#1f2937'},
+  };
+
+  // Helper: create SVG element
+  const el=(tag,attrs={})=>{
+    const e=document.createElementNS(ns,tag);
+    Object.entries(attrs).forEach(([k,v])=>e.setAttribute(k,v));
+    return e;
+  };
+  const txt=(text,attrs={})=>{
+    const t=el('text',attrs);t.textContent=text;return t;
+  };
+  const wrapText=(str,maxChars)=>{
+    if(str.length<=maxChars)return[str];
+    const words=str.split(' ');const lines=[];let cur='';
+    words.forEach(w=>{if((cur+' '+w).trim().length>maxChars){if(cur)lines.push(cur);cur=w;}else cur=(cur+' '+w).trim();});
+    if(cur)lines.push(cur);return lines;
+  };
+
+  // Layout rows: [{type,phase,data,h}]
+  const rows=[];
+
+  // ① DB boxes (side-by-side or stacked depending on count)
+  const nDB=dbs.length+(otherN>0?1:0);
+  rows.push({type:'dbs',phase:'Identification',dbs,otherSrc,otherN,h:0}); // h=0: dynamic, computed during draw
+
+  // ② Total identified (always)
+  rows.push({type:'total',phase:'Identification',n:grand,h:BH_MAIN});
+
+  // ③ After deduplication
+  rows.push({type:'dedup',phase:'Screening',n:afterDupl,dupl,h:BH_MAIN});
+
+  // ④ Screening steps
+  steps.filter(s=>s.phase==='Screening').forEach(s=>rows.push({type:'step',phase:'Screening',step:s,h:BH_MAIN}));
+
+  // ⑤ Eligibility steps
+  steps.filter(s=>s.phase==='Eligibility').forEach(s=>rows.push({type:'step',phase:'Eligibility',step:s,h:BH_MAIN}));
+
+  // ⑥ Inclusion
+  rows.push({type:'inclusion',phase:'Inclusion',n:finalN,h:BH_INCL});
+
+  // Total height
+  const TITLE_H=38;
+  // Estimate dynamic DB height
+  const allDBsEst=[...dbs];if(otherN>0)allDBsEst.push({q:'',n:otherN});
+  const CHARS_EST=47,Q_LH_EST=12,est=allDBsEst.reduce((s,d)=>{
+    const qL=prWrap(d.q||'',CHARS_EST).length;
+    return s+(10+18+(qL>0?6+qL*Q_LH_EST:0)+18+10)+8;
+  },0);
+  const totalH=TITLE_H+est+(rows.length-1)*(BH_MAIN+ROW_GAP)+BH_INCL+ROW_GAP*2+16;
+
+  const svg=el('svg',{xmlns:ns,width:SVG_W,height:totalH,viewBox:`0 0 ${SVG_W} ${totalH}`,'font-family':'Inter,Arial,sans-serif'});
+  svg.appendChild(el('rect',{width:SVG_W,height:totalH,fill:'white'}));
+  const g=el('g');svg.appendChild(g);
+
+  // Title
+  g.appendChild(txt('PRISMA Flow Diagram for Bibliometric Studies',{x:SVG_W/2,y:24,'text-anchor':'middle','font-size':14,'font-weight':'bold',fill:'#111'}));
+
+  // Helpers
+  function box(x,y,w,h,fill,stroke,rx=5){
+    return el('rect',{x,y,width:w,height:h,fill,stroke,'stroke-width':1.6,rx});
+  }
+  function vArrow(x,y1,y2){
+    g.appendChild(el('line',{x1:x,y1:y1,x2:x,y2:y2-6,stroke:'#555','stroke-width':1.4}));
+    g.appendChild(el('polygon',{points:`${x},${y2} ${x-5},${y2-8} ${x+5},${y2-8}`,fill:'#555'}));
+  }
+  function hDashedArrow(x1,x2,y){
+    g.appendChild(el('line',{x1,y1:y,x2:x2-6,y2:y,stroke:'#c2410c','stroke-width':1.4,'stroke-dasharray':'4,3'}));
+    g.appendChild(el('polygon',{points:`${x2},${y} ${x2-8},${y-4} ${x2-8},${y+4}`,fill:'#c2410c'}));
+  }
+  function phaseLbl(ph,y1,y2){
+    const c=PC[ph]||PC.Inclusion;
+    const pad=4;
+    g.appendChild(el('rect',{x:LPAD,y:y1-pad,width:PLBL,height:(y2-y1)+pad*2,fill:c.lbl,rx:5}));
+    const cx=LPAD+PLBL/2, cy=(y1+y2)/2;
+    const t=txt(ph.toUpperCase(),{x:cx,y:cy,'text-anchor':'middle','font-size':10,'font-weight':'bold',fill:'white','dominant-baseline':'middle',transform:`rotate(-90,${cx},${cy})`});
+    g.appendChild(t);
+  }
+
+  // Draw rows
+  let cy=TITLE_H+8;
+  const phaseSpans={};  // phase->{y1,y2}
+
+  rows.forEach((row,ri)=>{
+    const ph=row.phase;
+    const c=PC[ph]||PC.Inclusion;
+    const ry=cy, rh=row.h;
+    const midY=ry+rh/2, botY=ry+rh;
+    const prevRow=ri>0?rows[ri-1]:null;
+    let isDbs=false;
+
+    // Track phase spans
+    if(!phaseSpans[ph])phaseSpans[ph]={y1:ry,y2:botY};
+    else phaseSpans[ph].y2=botY;
+
+    // ─ Arrow from previous row (skip for dbs, skip for total when prev is dbs) ─
+    if(ri>0&&row.type!=='dbs'&&!(row.type==='total')){
+      vArrow(MBX+MBW/2, ry-(ROW_GAP), ry);
+    }
+
+    if(row.type==='dbs'){
+      // DB boxes stacked vertically — full query string displayed with wrapping
+      const allDBs=[...row.dbs];
+      if(row.otherN>0)allDBs.push({name:row.otherSrc||'Other sources',q:'',n:row.otherN,other:true});
+      const CHARS=Math.floor((MBW-56)/6.2); // chars per line for query (~40)
+      const Q_LH=12, VPAD=10, NAME_H=17, N_H=16, QPAD=5;
+      let dbStackY=ry;
+      allDBs.forEach((db,di)=>{
+        const qLines=prWrap(db.q||'',CHARS);
+        const dbH=VPAD+NAME_H+(qLines.length>0?QPAD+qLines.length*Q_LH:0)+N_H+VPAD;
+        g.appendChild(box(MBX,dbStackY,MBW,dbH,c.bg,c.bdr));
+        // DB name (bold, left) + N records (right)
+        g.appendChild(txt(db.name||(db.other?'Other sources':'Database'),{x:MBX+10,y:dbStackY+VPAD+12,'text-anchor':'start','font-size':10.5,'font-weight':'bold',fill:c.bdr}));
+        g.appendChild(txt(`N = ${db.n.toLocaleString()}`,{x:MBX+MBW-10,y:dbStackY+VPAD+12,'text-anchor':'end','font-size':10.5,'font-weight':'bold',fill:c.lbl}));
+        // Full query string — wrapped lines
+        if(qLines.length>0){
+          const qY0=dbStackY+VPAD+NAME_H+QPAD+9;
+          g.appendChild(txt('Query:',{x:MBX+10,y:qY0,'text-anchor':'start','font-size':8,'font-weight':'bold',fill:'#666'}));
+          qLines.forEach((line,li)=>{
+            g.appendChild(txt(line,{x:MBX+52,y:qY0+li*Q_LH,'text-anchor':'start','font-size':8,fill:'#333'}));
+          });
+        }
+        // Connector line between stacked DB boxes
+        if(di<allDBs.length-1){
+          const btm=dbStackY+dbH;
+          g.appendChild(el('line',{x1:MBX+MBW/2,y1:btm,x2:MBX+MBW/2,y2:btm+8,stroke:'#888','stroke-width':1}));
+        }
+        dbStackY+=dbH+8;
+      });
+      // Update phase span bottom and advance cy
+      if(phaseSpans[ph])phaseSpans[ph].y2=dbStackY-8;
+      cy=dbStackY+ROW_GAP;
+      isDbs=true;
+    }
+    else if(row.type==='total'){
+      g.appendChild(box(MBX,ry,MBW,rh,c.bg,c.bdr));
+      g.appendChild(txt('Records identified',{x:MBX+MBW/2,y:ry+22,'text-anchor':'middle','font-size':11,'font-weight':'bold',fill:c.bdr}));
+      g.appendChild(txt(`N = ${row.n.toLocaleString()}`,{x:MBX+MBW/2,y:ry+42,'text-anchor':'middle','font-size':13,'font-weight':'bold',fill:c.lbl}));
+    }
+    else if(row.type==='dedup'){
+      g.appendChild(box(MBX,ry,MBW,rh,c.bg,c.bdr));
+      g.appendChild(txt('Records after duplicate removal',{x:MBX+MBW/2,y:ry+22,'text-anchor':'middle','font-size':11,'font-weight':'bold',fill:c.bdr}));
+      g.appendChild(txt(`N = ${row.n.toLocaleString()}`,{x:MBX+MBW/2,y:ry+42,'text-anchor':'middle','font-size':13,'font-weight':'bold',fill:c.lbl}));
+      if(row.dupl>0){
+        hDashedArrow(MBX+MBW, EBX, midY);
+        g.appendChild(box(EBX,ry,EBW,rh,'#fff7ed','#c2410c',5));
+        g.appendChild(txt('Duplicates removed',{x:EBX+EBW/2,y:ry+22,'text-anchor':'middle','font-size':10,'font-weight':'bold',fill:'#9a3412'}));
+        g.appendChild(txt(`N = ${row.dupl.toLocaleString()}`,{x:EBX+EBW/2,y:ry+42,'text-anchor':'middle','font-size':12,'font-weight':'bold',fill:'#c2410c'}));
+      }
+    }
+    else if(row.type==='step'){
+      const s=row.step;
+      const desc=s.desc.length>38?s.desc.slice(0,36)+'…':s.desc;
+      g.appendChild(box(MBX,ry,MBW,rh,c.bg,c.bdr));
+      g.appendChild(txt(desc,{x:MBX+MBW/2,y:ry+22,'text-anchor':'middle','font-size':10,'font-weight':'bold',fill:c.bdr}));
+      g.appendChild(txt(`N = ${s.n.toLocaleString()}`,{x:MBX+MBW/2,y:ry+42,'text-anchor':'middle','font-size':13,'font-weight':'bold',fill:c.lbl}));
+      if(s.excl>0){
+        hDashedArrow(MBX+MBW, EBX, midY);
+        g.appendChild(box(EBX,ry,EBW,rh,'#fff7ed','#c2410c',5));
+        const elbl=s.desc.length>28?s.desc.slice(0,26)+'…':s.desc;
+        g.appendChild(txt('Excluded: '+s.excl.toLocaleString(),{x:EBX+EBW/2,y:ry+22,'text-anchor':'middle','font-size':10,'font-weight':'bold',fill:'#9a3412'}));
+        g.appendChild(txt(elbl,{x:EBX+EBW/2,y:ry+42,'text-anchor':'middle','font-size':9,fill:'#555'}));
+      }
+    }
+    else if(row.type==='inclusion'){
+      g.appendChild(box(MBX,ry,MBW,rh,c.bg,c.bdr));
+      g.appendChild(txt('Studies included in bibliometric analysis',{x:MBX+MBW/2,y:ry+22,'text-anchor':'middle','font-size':11,'font-weight':'bold',fill:c.bdr}));
+      g.appendChild(txt(`N = ${row.n.toLocaleString()}`,{x:MBX+MBW/2,y:ry+44,'text-anchor':'middle','font-size':15,'font-weight':'bold',fill:c.lbl}));
+    }
+
+    if(!isDbs) cy=botY+ROW_GAP;
+  });
+
+  // Phase labels on left
+  Object.entries(phaseSpans).forEach(([ph,span])=>{
+    phaseLbl(ph,span.y1,span.y2);
+  });
+
+  // Display
+  const out=document.getElementById('pr-out');
+  out.innerHTML='';out.appendChild(svg);
+  document.getElementById('pr-dl-btn').style.display='';
+  document.getElementById('pr-dl-svg-btn').style.display='';
+  const msg=`✓ Diagram generated · ${dbs.length} database(s) · ${steps.length} filter step(s) · Final N = ${finalN.toLocaleString()}`;
+  document.getElementById('pr-msg').textContent=msg;
+  APP._prismaSVG=svg;
+}
+
+function dlPRISMA(fmt){
+  const svg=APP._prismaSVG;if(!svg){alert('Generate the diagram first.');return;}
+  if(fmt==='svg'){
+    const s=new XMLSerializer().serializeToString(svg);
+    const b=new Blob([s],{type:'image/svg+xml;charset=utf-8'});
+    const a=document.createElement('a');a.download='PRISMA_FlowDiagram.svg';
+    a.href=URL.createObjectURL(b);a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+    return;
+  }
+  const dpi=getDPI(),mime='image/png';
+  const W=parseInt(svg.getAttribute('width'))||800,H=parseInt(svg.getAttribute('height'))||600;
+  const s=new XMLSerializer().serializeToString(svg);
+  const blob=new Blob([s],{type:'image/svg+xml;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const img=new Image();
+  img.onload=()=>{
+    const off=document.createElement('canvas');
+    off.width=Math.round(W*dpi);off.height=Math.round(H*dpi);
+    const ctx=off.getContext('2d');ctx.scale(dpi,dpi);
+    ctx.fillStyle='white';ctx.fillRect(0,0,W,H);
+    ctx.drawImage(img,0,0,W,H);
+    const a=document.createElement('a');
+    a.download=`PRISMA_FlowDiagram_${Math.round(dpi*96)}dpi.png`;
+    a.href=off.toDataURL(mime,0.96);a.click();
+    URL.revokeObjectURL(url);
+  };
+  img.src=url;
+}
+
+
+
+
+// ══════════════════════════════════════════════════════════════
+// STAGE 1 — INGESTION & DEDUPLICATION  (ported from BiblioStream v8)
+// Scopus + Web of Science + other databases, multi-file upload →
+// 59-column Bibliometrix schema → optional PY filter → 3-signal
+// cross-database deduplication → merged dataset fed to the figure engine.
+// ══════════════════════════════════════════════════════════════
+
+const ZONES = ['scopus', 'wos', 'other'];
+const ZONE_HINT = { scopus: 'SCOPUS', wos: 'WOS', other: 'AUTO' };
+const ZONE_NAME = { scopus: 'Scopus', wos: 'Web of Science', other: 'Other databases' };
+
+// ───────────── State ─────────────
+const state = {
+  scopusFiles: [], wosFiles: [], otherFiles: [],    // File objects per upload zone
+  scopusData: [], wosData: [], otherData: [],       // parsed + year-filtered records per zone
+  rawScopus: [], rawWos: [], rawOther: [],          // snapshots BEFORE year filter / dedup
+  mergedData: [],    // deduplicated corpus (59-col schema + DB_Origin)
+  duplicates: [],    // removed duplicates with _dupReason
+  yearFiltered: []   // records dropped by the PY filter
+};
+
+// ───────────── Utilities ─────────────
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+function escHtml(s) { return String(s === null || s === undefined ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+let toastTimeout;
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  if (!toast) { console.log('[toast]', msg); return; }
+  document.getElementById('toast-msg').textContent = msg;
+  toast.style.display = 'block';
+  clearTimeout(toastTimeout);
+  toastTimeout = setTimeout(() => { toast.style.display = 'none'; }, 3200);
+}
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1048576).toFixed(1) + ' MB';
+}
+function setPyHint(msg, kind) {
+  const h = document.getElementById('py-filter-hint');
+  if (!h) return;
+  if (!msg) { h.style.display = 'none'; return; }
+  h.style.display = 'block';
+  h.textContent = msg;
+  h.style.color = kind === 'err' ? '#c62828' : (kind === 'ok' ? 'var(--sec)' : 'var(--onsv)');
+}
+
+// ───────────── File handling (Scopus / WoS / Other drop zones) ─────────────
+const ACCEPT_RX = /\.(csv|tsv|txt|bib|ris|xlsx|xls|json|nbib)$/i;
+function handleDragOver(e, id) { e.preventDefault(); document.getElementById(id).classList.add('dov'); }
+function handleDragLeave(e, id) { document.getElementById(id).classList.remove('dov'); }
+function handleDrop(e, db) {
+  e.preventDefault();
+  document.getElementById(db+'-drop').classList.remove('dov');
+  const files = Array.from(e.dataTransfer.files).filter(f => ACCEPT_RX.test(f.name));
+  if (files.length) addFiles(files, db);
+  else showToast('Unsupported format — use .csv, .tsv, .txt, .xlsx, .bib, .ris, .json or .nbib');
+}
+function handleFileSelect(e, db) {
+  const files = Array.from(e.target.files);
+  if (files.length) addFiles(files, db);
+  e.target.value = ''; // allow re-adding the same file after removal
+}
+function addFiles(newFiles, db) {
+  const existing = state[db+'Files'];
+  let added = 0;
+  newFiles.forEach(f => {
+    if (!existing.find(x => x.name === f.name && x.size === f.size)) { existing.push(f); added++; }
+  });
+  renderFileList(db);
+  if (added) showToast(added + ' file(s) added — ' + ZONE_NAME[db]);
+  else showToast('File(s) already in the list');
+}
+function removeFileFromList(db, index) { state[db+'Files'].splice(index, 1); renderFileList(db); }
+function clearFileList(db) { state[db+'Files'] = []; renderFileList(db); }
+function renderFileList(db) {
+  const files = state[db+'Files'];
+  const container = document.getElementById(db+'-file-list');
+  const badge = document.getElementById(db+'-badge');
+  if (badge) {
+    badge.textContent = files.length + (files.length === 1 ? ' file' : ' files');
+    badge.style.display = files.length ? 'inline-block' : 'none';
+  }
+  container.innerHTML = files.map((f, i) => {
+    const ext = f.name.split('.').pop().toUpperCase();
+    const det = f._detected ? `<span class="fdet" title="Detected source · parsed records">${escHtml(f._detected)}</span>` : '';
+    return `<div class="fit">
+      <span class="fext ${ext === 'BIB' ? 'bib' : (ext === 'JSON' ? 'json' : '')}">${escHtml(ext)}</span>
+      <span class="fin" title="${escHtml(f.name)}">${escHtml(f.name)}</span>${det}
+      <span class="fis">${formatFileSize(f.size)}</span>
+      <span class="mi frm" title="Remove" onclick="removeFileFromList('${db}',${i})">close</span>
+    </div>`;
+  }).join('');
+  const hint = document.querySelector('#'+db+'-drop .dz-hint');
+  if (hint) hint.textContent = files.length ? 'Add more files or click to choose' : 'Drop files here or click to choose';
+  const dz = document.getElementById(db+'-drop');
+  if (dz) dz.classList.toggle('dz-compact', files.length > 0);
+  const total = ZONES.reduce((n, z) => n + state[z+'Files'].length, 0);
+  const btn = document.getElementById('btn-ingest');
+  if (btn) btn.disabled = total === 0;
+}
+
+// ───────────── File → records (format sniffing + source detection) ─────────────
+const readText = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = e => resolve(e.target.result);
+  reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+  reader.readAsText(file, 'UTF-8');
+});
+const readBuffer = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = e => resolve(e.target.result);
+  reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+  reader.readAsArrayBuffer(file);
+});
+
+// Route a file to the right reader. `hint` = SCOPUS | WOS | AUTO (zone the file was dropped in).
+// Every reader returns schema-compliant records; the DB field carries the detected source.
+async function parseFile(file, hint) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  const dbFor = (text) => hint === 'AUTO' ? guessDbFromText(text, 'OTHER') : hint;
+  try {
+    if (ext === 'xlsx' || ext === 'xls') {
+      if (typeof XLSX === 'undefined') { showToast(`⚠ SheetJS not loaded — ${file.name} skipped`); return []; }
+      return parseXLSX(await readBuffer(file), hint === 'AUTO' ? 'OTHER' : hint);
+    }
+    if (ext === 'json') return parseOpenAlexJSON(await readText(file));
+    if (ext === 'nbib') return parsePubMed(await readText(file));
+    const text = await readText(file);
+    let kind = ext === 'bib' ? 'bib' : ext === 'ris' ? 'ris' : sniffTextFormat(text);
+    if (kind === 'csv' && (ext === 'bib' || ext === 'ris')) kind = ext;
+    switch (kind) {
+      case 'wos':      return parseWoSPlain(text);
+      case 'pubmed':   return parsePubMed(text);
+      case 'cochrane': return parseCochrane(text);
+      case 'ris':      return parseRIS(text, dbFor(text));
+      case 'bib':      return parseBIB(text, dbFor(text));
+      case 'json':     return parseOpenAlexJSON(text);
+      default:         return parseCSV(text, hint === 'AUTO' ? 'OTHER' : hint);
+    }
+  } catch (err) {
+    showToast(`⚠ Error in ${file.name}: ${err.message}`);
+    console.warn('parseFile error', file.name, err);
+    return [];
+  }
+}
+
+// ───────────── Ingestion workflow ─────────────
+async function runIngestion() {
+  const totalFiles = ZONES.reduce((n, z) => n + state[z+'Files'].length, 0);
+  if (!totalFiles) { showToast('Add at least one file before processing'); return; }
+
+  const progEl = document.getElementById('ingestion-progress');
+  const resEl  = document.getElementById('ingestion-results');
+  progEl.style.display = 'block';
+  resEl.style.display = 'none';
+  document.getElementById('dsum').style.display = 'none';
+  document.getElementById('pst').style.display = 'none';
+  document.getElementById('btn-ingest').disabled = true;
+
+  const spinner = document.getElementById('ingestion-spinner');
+  spinner.className = 'spin'; spinner.textContent = ''; spinner.style.color = '';
+  const msgEl = document.getElementById('ingestion-status-msg');
+  msgEl.style.color = 'var(--sec)';
+  msgEl.textContent = 'Reading files…';
+
+  ['read','meta','dedup','merge'].forEach(s => {
+    document.getElementById('prog-'+s+'-bar').style.width = '0%';
+    document.getElementById('prog-'+s+'-pct').textContent = '0%';
+    document.getElementById('prog-'+s).style.opacity = s === 'read' ? '1' : '.4';
+  });
+  const setProgress = (step, val, msg) => {
+    document.getElementById('prog-'+step+'-bar').style.width = val+'%';
+    document.getElementById('prog-'+step+'-pct').textContent = val+'%';
+    if (msg) msgEl.textContent = msg;
+  };
+  const activateStep = (step) => { document.getElementById('prog-'+step).style.opacity = '1'; };
+
+  // ---- Step 1: Read all files (three zones) ----
+  let filesRead = 0;
+  setProgress('read', 10, 'Reading files…');
+  try {
+    for (const z of ZONES) {
+      state[z+'Data'] = [];
+      for (const file of state[z+'Files']) {
+        setProgress('read', Math.round(10 + (filesRead/totalFiles)*70), `Reading ${file.name}…`);
+        const recs = await parseFile(file, ZONE_HINT[z]);
+        // remember what was detected inside each file (shown in the file list)
+        const srcs = [...new Set(recs.map(r => dbLabelOf(srcCodeOf(r, ZONE_HINT[z] === 'AUTO' ? 'OTHER' : ZONE_HINT[z]))))];
+        file._detected = (srcs.length ? srcs.join('/') : 'no records') + ' · ' + recs.length;
+        state[z+'Data'].push(...recs);
+        filesRead++; await delay(60);
+      }
+      renderFileList(z);
+    }
+  } catch (e) {
+    showToast('Error reading file: ' + e.message);
+    document.getElementById('btn-ingest').disabled = false;
+    return;
+  }
+  const rawTotal = ZONES.reduce((n, z) => n + state[z+'Data'].length, 0);
+  setProgress('read', 100, `${totalFiles} file(s) read — ${rawTotal} raw records`);
+  await delay(200);
+
+  if (!rawTotal) {
+    spinner.className = 'mi'; spinner.textContent = 'error'; spinner.style.color = '#c62828';
+    msgEl.style.color = '#c62828';
+    msgEl.textContent = 'No records could be parsed. Check that the files are database exports in a supported format (see "Supported databases & formats").';
+    document.getElementById('btn-ingest').disabled = false;
+    return;
+  }
+
+  // Tag every parsed record with a stable UID + source DB, then snapshot the raw corpus
+  state.scopusData.forEach((r, i) => { r._srcDB = srcCodeOf(r, 'SCOPUS'); r._rawUID = 'S#' + i; });
+  state.wosData.forEach((r, i)    => { r._srcDB = srcCodeOf(r, 'WOS');    r._rawUID = 'W#' + i; });
+  state.otherData.forEach((r, i)  => { r._srcDB = srcCodeOf(r, 'OTHER');  r._rawUID = 'O#' + i; });
+  state.rawScopus = state.scopusData.slice();
+  state.rawWos = state.wosData.slice();
+  state.rawOther = state.otherData.slice();
+
+  // ---- Step 2: Metadata ----
+  activateStep('meta');
+  setProgress('meta', 40, 'Normalising metadata — 59-column Bibliometrix schema…');
+  await delay(300);
+  setProgress('meta', 100, 'Metadata normalised');
+  await delay(120);
+
+  // ---- Step 2.5: Year filter (PY) ----
+  state.yearFiltered = [];
+  if (document.getElementById('py-filter-enable').checked) {
+    let pyMin = parseInt(document.getElementById('py-min').value.trim());
+    let pyMax = parseInt(document.getElementById('py-max').value.trim());
+    if (isNaN(pyMin)) pyMin = -Infinity;
+    if (isNaN(pyMax)) pyMax = Infinity;
+    if (pyMin > pyMax) { const t = pyMin; pyMin = pyMax; pyMax = t; }
+    const includeMissing = document.getElementById('py-include-missing').checked;
+    const lo = pyMin === -Infinity ? '…' : pyMin, hi = pyMax === Infinity ? '…' : pyMax;
+    setProgress('meta', 100, `Year filter: ${lo}–${hi}`);
+    const passes = rec => {
+      const yr = parseInt((rec.PY||'').toString().trim());
+      if (isNaN(yr)) return includeMissing;
+      return yr >= pyMin && yr <= pyMax;
+    };
+    const outOfRange = r => `PY ${r.PY||'∅'} outside [${lo},${hi}]`;
+    for (const z of ZONES) {
+      const kept = [], dropped = [];
+      for (const rec of state[z+'Data']) (passes(rec) ? kept : dropped).push(rec);
+      state[z+'Data'] = kept;
+      state.yearFiltered.push(...dropped.map(r => ({...r, _filterReason: outOfRange(r)})));
+    }
+    if (state.yearFiltered.length) showToast(`Year filter: ${state.yearFiltered.length} record(s) outside the range removed`);
+    await delay(120);
+  }
+
+  // ---- Step 3: Dedup ----
+  activateStep('dedup');
+  setProgress('dedup', 30, 'Detecting duplicates…');
+  await delay(250);
+  const { kept, dupLog } = deduplicate(state.scopusData, state.wosData, state.otherData);
+  state.mergedData = kept;
+  state.duplicates = dupLog;
+  setProgress('dedup', 100, 'Duplicates identified');
+  await delay(120);
+
+  // ---- Step 4: Merge ----
+  activateStep('merge');
+  setProgress('merge', 60, 'Consolidating the final dataset…');
+  await delay(250);
+  setProgress('merge', 100, 'Datasets merged successfully');
+  await delay(150);
+
+  // Done
+  spinner.className = 'mi'; spinner.textContent = 'check_circle'; spinner.style.color = '#2e7d32';
+  msgEl.style.color = '#2e7d32';
+  msgEl.textContent = 'Processing complete!';
+
+  // Results
+  document.getElementById('res-scopus-count').textContent = state.scopusData.length.toLocaleString();
+  document.getElementById('res-wos-count').textContent = state.wosData.length.toLocaleString();
+  document.getElementById('res-other-count').textContent = state.otherData.length.toLocaleString();
+  const otherSrcs = [...new Set(state.otherData.map(r => dbLabelOf(r._srcDB)))];
+  document.getElementById('res-other-sub').textContent = otherSrcs.length ? otherSrcs.join(' · ') : 'Dimensions · OpenAlex · Lens · PubMed · Cochrane';
+  document.getElementById('res-yearfilter-count').textContent = state.yearFiltered.length.toLocaleString();
+  document.getElementById('res-dup-count').textContent = state.duplicates.length.toLocaleString();
+  document.getElementById('res-final-count').textContent = state.mergedData.length.toLocaleString();
+  renderPreviewTable();
+  resEl.style.display = 'block';
+  document.getElementById('btn-ingest').disabled = false;
+  showToast('Ingestion complete — ' + state.mergedData.length + ' unique records ready');
+
+  // Hand the merged corpus to the figure engine
+  feedFigureEngine();
+}
+
+function originClass(origin) {
+  if (origin.includes('/')) return 'both';
+  if (origin === 'Scopus') return 'sco';
+  if (origin === 'WOS') return 'wos';
+  return 'oth';
+}
+function renderPreviewTable() {
+  const tbody = document.getElementById('preview-table-body');
+  tbody.innerHTML = '';
+  const preview = state.mergedData.slice(0, 50);
+  preview.forEach((rec, i) => {
+    const origin = rec.DB_Origin || dbLabelOf(rec._srcDB || srcCodeOf(rec, 'Other'));
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="num">${i+1}</td>
+      <td class="ti" title="${escHtml(rec.TI)}">${escHtml(rec.TI||'—')}</td>
+      <td class="au">${escHtml((rec.AU||'').split(';')[0])}</td>
+      <td class="num">${escHtml(rec.PY||'—')}</td>
+      <td class="so" title="${escHtml(rec.SO)}">${escHtml(rec.SO||'—')}</td>
+      <td><span class="dbp ${originClass(origin)}">${escHtml(origin)}</span></td>
+      <td class="doi">${escHtml(rec.DI||'—')}</td>`;
+    tbody.appendChild(tr);
+  });
+  document.getElementById('preview-count-label').textContent = `Showing ${preview.length} of ${state.mergedData.length.toLocaleString()} records`;
+}
+
+// Convert the deduplicated 59-column corpus into header/rows and run the
+// existing figure-engine processor (procRows), which fills APP.data,
+// renders the Dataset Summary and unlocks the figure pages.
+function feedFigureEngine() {
+  if (!state.mergedData.length) { showToast('No records to analyse'); return; }
+  const header = BIBLIO_COLUMNS.slice();
+  const rows = state.mergedData.map(rec => BIBLIO_COLUMNS.map(c => (rec[c] === undefined || rec[c] === null) ? '' : rec[c]));
+  const fl = document.getElementById('flst'); if (fl) fl.innerHTML = '';
+  APP.source = {
+    mode: 'stage1',
+    files: ZONES.flatMap(z => state[z+'Files'].map(f => f.name)),
+    scopus: state.scopusData.length, wos: state.wosData.length, other: state.otherData.length,
+    duplicates: state.duplicates.length, yearFiltered: state.yearFiltered.length,
+    n: rows.length
+  };
+  procRows(rows, header);
+}
+
+// Bibliometrix column schema — exact 59-column order from reference output files
+// (Saída.xlsx / 1_500_Bibliometrix-Export-File-2026-04-13.xlsx)
+// This is the AUTHORITATIVE schema. All parsers and exports use this order.
+const BIBLIO_COLUMNS = [
+  'AU','KW_Merged','DE','ID','C1','CR','AB','PA','affiliations','AR',
+  'EM','BO','da','DI','GA','eissn','earlyaccessdate','BE','FU','FX',
+  'BN','SN','JI','SO','LA','month','note','NR','PN','oa',
+  'orcid.numbers','organization','PP','PU','SC','researcherid.numbers','SE','TC','TI','DT',
+  'UT','usage.count.last.180.days','U2','VL','web.of.science.categories.','web.of.science.index','PY','AF','RP','DB',
+  'J9','AB_raw','TI_raw','DE_raw','AU_UN','AU1_UN','AU_UN_NR','SR_FULL','SR'
+];
+
+
+// ── Year-range auto-detect (v5) ──────────────────────────────────────────────
+// Scans uploaded files quickly to extract PY values without full normalisation,
+// so the user can pre-fill min/max before running ingestion.
+async function autoDetectYearRange() {
+  const allFiles = [...state.scopusFiles, ...state.wosFiles, ...state.otherFiles];
+  if (allFiles.length === 0) {
+    setPyHint('Add files before auto-detecting.', 'err');
+    return;
+  }
+  setPyHint('Scanning the PY field in the uploaded files…', 'info');
+  const years = [];
+  const readAsText = f => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = e => res(e.target.result);
+    r.onerror = () => rej(new Error('read'));
+    r.readAsText(f, 'UTF-8');
+  });
+  // Quick text scan: regex for 4-digit years in PY-ish contexts
+  const scanText = (txt) => {
+    // BibTeX style: year = {2020}
+    const bib = txt.match(/\byear\s*=\s*[{"]\s*(\d{4})\s*[}"]?/gi) || [];
+    bib.forEach(m => { const y = parseInt(m.match(/(\d{4})/)[1]); if(y>=1900 && y<=2100) years.push(y); });
+    // RIS style: PY  - 2020
+    const ris = txt.match(/^\s*PY\s+-\s+(\d{4})/gim) || [];
+    ris.forEach(m => { const y = parseInt(m.match(/(\d{4})/)[1]); if(y>=1900 && y<=2100) years.push(y); });
+    // WoS plaintext / PubMed MEDLINE / Cochrane / OpenAlex JSON
+    [/^PY (\d{4})/gm, /^DP\s{1,3}-\s*(\d{4})/gm, /^YR:\s*(\d{4})/gm, /"publication_year"\s*:\s*(\d{4})/g].forEach(rx => {
+      let mm; while ((mm = rx.exec(txt)) !== null) { const y = parseInt(mm[1]); if (y>=1900 && y<=2100) years.push(y); }
+    });
+    // CSV header → find PY/Year column index, then sample
+    const lines = txt.split(/\r?\n/);
+    if (lines.length > 1) {
+      const sep = lines[0].includes('\t') ? '\t' : ',';
+      const cols = parseCSVLine(lines[0], sep).map(s=>s.replace(/^[\uFEFF"']+|["']+$/g,'').trim().toLowerCase());
+      const pyIdx = cols.findIndex(c => c==='py' || c==='year' || c==='publication year' || c==='pubyear' || c==='publication_year' || c==='yr');
+      if (pyIdx >= 0) {
+        for (let i = 1; i < Math.min(lines.length, 5000); i++) {
+          const parts = parseCSVLine(lines[i], sep);
+          if (parts[pyIdx]) {
+            const ym = parts[pyIdx].replace(/[^0-9]/g,'').match(/(\d{4})/);
+            if (ym) { const y=parseInt(ym[1]); if(y>=1900 && y<=2100) years.push(y); }
+          }
+        }
+      }
+    }
+  };
+  for (const f of allFiles) {
+    const ext = f.name.split('.').pop().toLowerCase();
+    if (['csv','tsv','bib','ris','txt','nbib','json'].includes(ext)) {
+      try {
+        const txt = await readAsText(f);
+        scanText(txt);
+      } catch {}
+    } else if (ext === 'xlsx' && typeof XLSX !== 'undefined') {
+      try {
+        const buf = await f.arrayBuffer();
+        const wb = XLSX.read(buf, {type:'array'});
+        for (const sn of wb.SheetNames) {
+          const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], {defval:''});
+          for (const r of rows) {
+            const v = r.PY || r.Year || r.year || r['Publication Year'] || '';
+            const ym = String(v).match(/(\d{4})/);
+            if (ym) { const y=parseInt(ym[1]); if(y>=1900 && y<=2100) years.push(y); }
+          }
+        }
+      } catch {}
+    }
+  }
+  if (years.length === 0) {
+    setPyHint('No PY values detected in the files. You can fill the range manually.', 'err');
+    return;
+  }
+  const mn = Math.min(...years), mx = Math.max(...years);
+  document.getElementById('py-min').value = mn;
+  document.getElementById('py-max').value = mx;
+  document.getElementById('py-filter-enable').checked = true;
+  setPyHint(`Detected ${years.length} PY values between ${mn} and ${mx}. Year filter enabled automatically.`, 'ok');
+}
+
+
+// ===================== PARSING — CSV / BIB / XLSX / RIS =====================
+// All parsers return records normalised to the BIBLIO_COLUMNS schema via
+// enforceSchema(), guaranteeing consistent structure regardless of source.
+
+// ── Enforce strict Bibliometrix schema — 59-column reference model ───────────
+// This is the single point where schema compliance is guaranteed.
+// Every parser calls this as its final step.
+// Column order and names match exactly: Saída.xlsx / 1_500_Bibliometrix-Export-File.
+function enforceSchema(rec) {
+  const out = {};
+  // Initialise all 59 columns to empty string
+  BIBLIO_COLUMNS.forEach(col => { out[col] = ''; });
+
+  // Copy any matching field that is already in the right key
+  BIBLIO_COLUMNS.forEach(col => {
+    if (rec[col] !== null && rec[col] !== undefined && rec[col] !== '') {
+      out[col] = String(rec[col]).trim();
+    }
+  });
+
+  // ── Derived / computed fields ─────────────────────────────────────────────
+
+  // Raw text copies (for UI display and BM25 tokenisation)
+  if (!out.TI_raw)  out.TI_raw  = out.TI;
+  if (!out.AB_raw)  out.AB_raw  = out.AB;
+  if (!out.DE_raw)  out.DE_raw  = out.DE;
+
+  // KW_Merged — union of author keywords (DE) and keyword-plus (ID)
+  // Stored UPPERCASE to match Bibliometrix convention
+  const de_up = out.DE ? out.DE.toUpperCase() : '';
+  const id_up = out.ID ? out.ID.toUpperCase() : '';
+  if (!out.KW_Merged) {
+    const kws = new Set();
+    [de_up, id_up].filter(Boolean).forEach(p =>
+      p.split(/[;,]/).map(k=>k.trim()).filter(Boolean).forEach(k=>kws.add(k)));
+    out.KW_Merged = [...kws].join('; ');
+  }
+
+  // DE — store uppercase (Bibliometrix convention)
+  if (out.DE && out.DE === out.DE_raw) out.DE = out.DE.toUpperCase();
+
+  // AU — normalise to bibliometrix standard: SURNAME IN;SURNAME2 IN2
+  // Scopus exports "Farneda F.Z.; Rocha R." — needs: "FARNEDA FZ;ROCHA R"
+  // WoS already exports uppercase without dots
+  if (out.AU) {
+    // normalise every author to the Bibliometrix convention "SURNAME IN" — handles Scopus "Silva J.A." /
+    // "Silva, J.A.", WoS / PubMed / Cochrane "Silva, JA" / "Silva JA" and Lens / OpenAlex / Dimensions "João A. Silva".
+    // Names already in canonical form (e.g. from Bibliometrix exports) are left untouched.
+    out.AU = out.AU.split(';').map(a => {
+      const t = a.trim();
+      return /^[A-Z][A-Z'\- ]*[A-Z]( [A-Z]{1,3})?$/.test(t) ? t : normAuthorName(t);
+    }).filter(Boolean).join(';');
+  }
+
+  // Fallback: anonymous author if AU is empty (required for SR uniqueness)
+  if (!out.AU) out.AU = 'ANON';
+
+  // AF — full author names
+  if (!out.AF && out.affiliations) out.AF = out.affiliations;
+  if (!out.AF && out.AU) out.AF = out.AU;
+
+  // NR — number of cited references
+  // Scopus CR uses '; ' between refs — count correctly
+  if (!out.NR && out.CR) {
+    out.NR = String(out.CR.split(';').filter(s => s.trim()).length);
+  }
+
+  // da — download date (today if not set)
+  if (!out.da) {
+    const d = new Date();
+    out.da = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  }
+
+  // SR_FULL and SR — bibliometrix row keys: "FIRSTAUTHOR PY, J9ABBREV"
+  // Must be unique, uppercase, accent-free for R row.names compatibility
+  if (!out.SR_FULL || !out.SR) {
+    const firstAuth = out.AU.split(';')[0].split(',')[0].trim();
+    // Journal abbreviation: uppercase, accent-free
+    const rawJ = (out.J9 || out.SO || '').slice(0, 40);
+    const journal = rawJ.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+    out.SR_FULL = journal
+      ? `${firstAuth}, ${out.PY}, ${journal}`.replace(/,\s*$/, '').trim()
+      : `${firstAuth}, ${out.PY}`.trim();
+    out.SR = out.SR_FULL;
+  }
+
+  return out;
+}
+
+// ── CSV parser (Scopus and WoS tab/comma-separated) ──────────────────────────
+function parseCSVLine(line, sep) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (inQuotes && line[i+1] === '"') { current += '"'; i++; }
+      else inQuotes = !inQuotes;
+    } else if ((sep ? c === sep : (c === ',' || c === '\t')) && !inQuotes) {
+      result.push(current.trim());
+      current = '';
+    } else {
+      current += c;
+    }
+  }
+  result.push(current.trim());
+  return result;
+}
+
+
+// ── BIB (BibTeX) parser — WoS and generic BibTeX ────────────────────────────
+// WoS exports use capitalised field names: Author, Title, Journal, Abstract,
+// Keywords, Keywords-Plus, Affiliation, DOI, Article-Number, ISSN, etc.
+// Generic BibTeX uses lowercase: author, title, journal, abstract, keywords.
+// Both variants are handled here and mapped to the 59-col schema.
+function parseBIB(text, db) {
+  const records = [];
+  // WoS BIB uses @article{ WOS:..., with capitalised keys
+  // Generic BibTeX uses @article{ key, with lowercase keys
+  // Split on @TYPE{ or @TYPE {
+  // Split on any @TYPE{ or @TYPE { pattern (handles WoS, Scopus, generic BibTeX)
+  const entries = text.replace(/@([a-zA-Z]+)\s*[{(]/g, '\n@$1{').split('\n@').slice(1).map(e=>'@'+e);
+  for (const entry of entries) {
+    if (!entry.trim() || !entry.includes('{')) continue;
+    // Multi-line field extractor: matches key = {value} or key = {multi\nline\nvalue}
+    const getField = (...names) => {
+      for (const name of names) {
+        // Try { } delimiters first (handles nested braces via greedy match)
+        const rx = new RegExp(`\\b${name}\\s*=\\s*\\{([\\s\\S]*?)\\}\\s*[,}]`, 'i');
+        const m = entry.match(rx);
+        if (m) return m[1].replace(/\s+/g, ' ').replace(/[{}]/g, '').trim();
+        // Try " " delimiters
+        const rx2 = new RegExp(`\\b${name}\\s*=\\s*"([\\s\\S]*?)"\\s*[,}]`, 'i');
+        const m2 = entry.match(rx2);
+        if (m2) return m2[1].replace(/\s+/g, ' ').trim();
+      }
+      return '';
+    };
+
+    const rec = {};
+
+    // Title (WoS: Title, Scopus: title)
+    rec.TI = getField('Title', 'title', 'ST');
+    if (!rec.TI) continue;
+
+    // Detect Scopus BIB by presence of 'source' field = 'Scopus'
+    const isScopusBIB = entry.toLowerCase().includes('source = {scopus}') ||
+                        entry.toLowerCase().includes('source = "scopus"');
+
+    // Authors: WoS uses "LastName, First and LastName2, First2 and ..."
+    // Convert to "LAST F;LAST2 F2" format (Bibliometrix abbreviated style)
+    const rawAuth = getField('Author', 'author');
+    if (rawAuth) {
+      // Split on ' and ' (with line breaks)
+      const authList = rawAuth.split(/\s+and\s+/i).map(a => a.trim()).filter(Boolean);
+      // Build abbreviated form: "SURNAME INITIALS"
+      rec.AU = authList.map(a => {
+        // "Last, First Middle" → "LAST FM"
+        const commaParts = a.split(',');
+        if (commaParts.length >= 2) {
+          const last = commaParts[0].trim().toUpperCase();
+          const initials = commaParts[1].trim().split(/\s+/).map(n=>n[0]||'').join('').toUpperCase();
+          return `${last} ${initials}`;
+        }
+        return a.trim().toUpperCase();
+      }).join(';');
+      // AF = full author names
+      rec.AF = authList.map(a => {
+        const commaParts = a.split(',');
+        if (commaParts.length >= 2) {
+          return (commaParts[0].trim() + ' ' + commaParts[1].trim())
+            .replace(/\s+/g,' ').toUpperCase();
+        }
+        return a.trim().toUpperCase();
+      }).join(';');
+    }
+
+    // Year
+    const ym = entry.match(/\bYear\s*=\s*[{"]{0,1}(\d{4})/i);
+    rec.PY = ym ? ym[1] : '';
+
+    // Journal / Source
+    rec.SO = getField('Journal', 'journal', 'Booktitle', 'booktitle');
+    // J9 / JI — abbreviated journal name
+    rec.J9 = getField('Journal-ISO', 'journal-iso', 'Abbreviated-Source-Title');
+    if (!rec.J9 && rec.SO) {
+      // Build abbreviation from first word of each journal word > 3 chars
+      rec.J9 = rec.SO.split(/\s+/).map(w=>w.length>3?w.slice(0,4):w).join(' ').toUpperCase().slice(0,30);
+    }
+    rec.JI = rec.J9;
+
+    // DOI
+    rec.DI = getField('DOI', 'doi').replace(/^https?:\/\/(dx\.)?doi\.org\//,'').trim();
+
+    // Abstract
+    rec.AB = getField('Abstract', 'abstract');
+
+    // Keywords (DE = author keywords, ID = keywords-plus)
+    rec.DE = getField('Keywords', 'keywords');
+    rec.ID = getField('Keywords-Plus', 'keywords-plus', 'KeywordsPlus');
+
+    // Volume, Number, Pages
+    rec.VL = getField('Volume', 'volume');
+    rec.PN = getField('Number', 'number', 'Issue');
+    rec.AR = getField('Article-Number', 'article-number', 'Art\.\sNo\.', 'eprint');
+    const bp = getField('Beginning-Page', 'beginning-page');
+    const ep = getField('Ending-Page', 'ending-page');
+    rec.PP = bp ? (ep ? `${bp}-${ep}` : bp) : getField('Pages', 'pages');
+
+    // ISSN / eISSN
+    rec.SN = getField('ISSN', 'issn');
+    rec.eissn = getField('eISSN', 'eissn', 'EISSN');
+
+    // Publisher, Address
+    rec.PU = getField('Publisher', 'publisher');
+    rec.PA = getField('Address', 'address');
+
+    // Affiliation → C1 and affiliations
+    const aff = getField('Affiliation', 'affiliation', 'Affiliations');
+    rec.C1 = aff;
+    rec.affiliations = aff;
+
+    // Corresponding author → RP
+    rec.RP = getField('Reprint-Addresses', 'reprint-addresses', 'Author-Address');
+
+    // Email → EM
+    rec.EM = getField('Author-Email', 'author-email', 'email');
+
+    // Cited references → CR
+    rec.CR = getField('Cited-References', 'cited-references', 'references').replace(/[{}]/g,'');
+
+    // Times cited / usage
+    rec.TC = getField('Times-Cited', 'times-cited', 'TC');
+    rec.U2 = getField('Usage-Count-Since-2013', 'usage-count-since-2013', 'U2');
+    rec['usage.count.last.180.days'] = getField('Usage-Count-Last-180-Days', 'U1');
+
+    // Research areas / WoS categories
+    rec.SC = getField('Research-Areas', 'research-areas');
+    rec['web.of.science.categories.'] = getField('Web-of-Science-Categories', 'web-of-science-categories');
+    rec['web.of.science.index'] = getField('Web-of-Science-Index', 'web-of-science-index');
+
+    // ORCID / ResearcherID
+    rec['orcid.numbers'] = getField('ORCID-Numbers', 'orcid-numbers', 'OI');
+    rec['researcherid.numbers'] = getField('ResearcherID-Numbers', 'researcherid-numbers', 'RI');
+
+    // Open access / other
+    rec.oa = getField('Open-Access', 'open-access', 'oa');
+    rec.LA = getField('Language', 'language') || 'ENGLISH';
+    rec.DT = getField('Type', 'type', 'Document-Type') || 'Article';
+    rec.FU = getField('Funding-Acknowledgement', 'funding-acknowledgement', 'FU');
+    rec.FX = getField('Funding-Text', 'funding-text', 'FX');
+    rec.GA = getField('Doc-Delivery-Number', 'doc-delivery-number', 'GA');
+    rec.earlyaccessdate = getField('Early-Access-Date', 'early-access-date', 'earlyaccessdate');
+    rec.month = getField('Month', 'month');
+    rec.SE = getField('Book-Series-Title', 'book-series-title', 'SE');
+    rec.BE = getField('Book-Editors', 'book-editors', 'BE');
+
+    // WoS accession number — extract from entry header WOS:XXXXXXXX
+    const utM = entry.match(/WOS:([\w]+)/i);
+    // Scopus EID: extract from url field or eid pattern
+    const eidM = entry.match(/eid=([\w\-\.]+)/i);
+    const eidDirect = getField('eid', 'EID');
+    rec.UT = utM ? 'WOS:' + utM[1]
+           : eidDirect ? eidDirect
+           : eidM ? eidDirect || eidM[1]
+           : getField('Unique-ID', 'unique-id', 'UT');
+
+    if (isScopusBIB) {
+      // ── Scopus BIB-specific field overrides ────────────────────────────────
+      // Scopus BIB uses: author_keywords, keywords, abbrev_source_title,
+      // correspondence_address, affiliations, pmid, note, publication_stage
+      rec.DE  = getField('author_keywords') || rec.DE;
+      rec.ID  = getField('keywords') || rec.ID;
+      rec.J9  = getField('abbrev_source_title') || rec.J9;
+      rec.JI  = rec.J9;
+      rec.RP  = getField('correspondence_address') || rec.RP;
+      rec.C1  = getField('affiliations') || rec.C1;
+      rec.affiliations = rec.C1;
+      // EM: extract email from correspondence_address
+      const corrAddr = getField('correspondence_address');
+      const emM2 = corrAddr.match(/email:\s*([^;\s,}]+)/i);
+      if (emM2) rec.EM = emM2[1];
+      // pmid → note
+      const pmid = getField('pmid');
+      if (pmid) rec.note = 'PMID:' + pmid;
+      // oa from note field: "Cited by: N; All Open Access; ..."
+      const noteVal = getField('note');
+      if (noteVal) {
+        const oaM = noteVal.match(/open access[^;]*/gi);
+        rec.oa = oaM ? oaM.join('; ') : '';
+        const citeM = noteVal.match(/cited by:\s*(\d+)/i);
+        if (citeM) rec.TC = rec.TC || citeM[1];
+      }
+      // pages: Scopus sometimes puts "35 - 53" in pages field
+      const pagesRaw = getField('pages');
+      if (pagesRaw && !rec.PP) {
+        rec.PP = pagesRaw.replace(/\s*-\s*/, '-').trim();
+      }
+      // EID for Scopus UT
+      const urlField = getField('url');
+      const eidUrlM = urlField.match(/eid=([\w.\-]+)/);
+      if (eidUrlM && !rec.UT) rec.UT = eidUrlM[1];
+      rec.DB = 'SCOPUS';
+    } else {
+      // Database
+      rec.DB = db === 'SCOPUS' ? 'SCOPUS' : ((db === 'WOS' || db === 'ISI' || !db) ? 'ISI' : String(db).toUpperCase());
+    }
+
+    records.push(enforceSchema(rec));
+  }
+  return records;
+}
+
+// ── RIS parser ────────────────────────────────────────────────────────────────
+// Supports standard RIS tags from Scopus, WoS, Mendeley, Zotero exports.
+function parseRIS(text, db) {
+  const records = [];
+  // Split into individual records on ER  (End Reference)
+  const entries = text.split(/\nER\s*-?\s*\n/i);
+  for (const entry of entries) {
+    if (!entry.trim()) continue;
+    // Parse all tag-value pairs (TAG  - value)
+    const fields = {};
+    const lines = entry.split('\n');
+    let lastTag = null;
+    for (const line of lines) {
+      const m = line.match(/^([A-Z][A-Z0-9])\s{1,2}-\s*(.*)/);
+      if (m) {
+        lastTag = m[1];
+        if (!fields[lastTag]) fields[lastTag] = [];
+        fields[lastTag].push(m[2].trim());
+      } else if (lastTag && line.startsWith('  ')) {
+        // Continuation line
+        fields[lastTag][fields[lastTag].length - 1] += ' ' + line.trim();
+      }
+    }
+    const get = (...tags) => {
+      for (const t of tags) {
+        if (fields[t] && fields[t][0]) return fields[t][0].trim();
+      }
+      return '';
+    };
+    const getAll = (...tags) => {
+      for (const t of tags) {
+        if (fields[t] && fields[t].length) return fields[t].join('; ');
+      }
+      return '';
+    };
+    const rec = {};
+    // Title — TI or T1 or ST
+    rec.TI  = get('TI','T1','ST','CT');
+    // Authors — AU or A1 (multiple entries joined)
+    rec.AU  = getAll('AU','A1');
+    // Year — PY or Y1 (extract 4-digit year)
+    const yr = get('PY','Y1','DA');
+    const yrM = yr.match(/\d{4}/);
+    rec.PY  = yrM ? yrM[0] : '';
+    // DOI
+    rec.DI  = get('DO','DOI');
+    // Abstract
+    rec.AB  = get('AB','N2');
+    // Source / Journal
+    rec.SO  = get('JO','JF','JA','T2','BT','PB');
+    rec.J9  = get('JA','JO');
+    rec.JI  = get('JA');
+    // Keywords
+    rec.DE  = getAll('KW','DE');
+    rec.ID  = getAll('KW','ID');
+    // Volume / pages
+    rec.VL  = get('VL');
+    rec.PP  = get('SP') + (get('EP') ? '-'+get('EP') : '');
+    // ISSN / ISBN
+    rec.SN  = get('SN','IS','BN');
+    // Language
+    rec.LA  = get('LA') || 'ENGLISH';
+    // Document type
+    rec.DT  = get('TY') || 'Article';
+    // Cited references
+    rec.CR  = getAll('CR','C7');
+    // Times cited
+    rec.TC  = get('TC','Z9','U2');
+    // UT / accession number
+    rec.UT  = get('UT','AN','M1');
+    // Affiliations
+    rec.C1  = getAll('AD','AF','C1');
+    rec.AU_UN = getAll('C3','AD');
+    // Publisher / address
+    rec.PU  = get('PB','CP');
+    rec.PA  = get('CY','PP');
+    // ORCID
+    rec['orcid.numbers'] = getAll('OI');
+    // Research areas / WoS categories
+    rec.SC  = get('SC');
+    rec['web.of.science.categories.'] = get('WC');
+    // Database source detection
+    const dbLabel = db.toUpperCase();
+    rec.DB  = dbLabel === 'WOS' ? 'ISI' : dbLabel;
+    rec.DB_Original = dbLabel;
+    if (rec.TI) records.push(enforceSchema(rec));
+  }
+  return records;
+}
+
+// ── XLSX parser (uses SheetJS loaded from CDN) ────────────────────────────────
+// Reads binary array buffer and maps columns to Bibliometrix schema.
+
+// ── Central field-mapping function — Scopus, WoS, generic ────────────────────
+// All parsers except RIS route through here.
+// Returns a record normalised via enforceSchema().
+function mapToLibrometrix(rec, db, headers) {
+  const out = {};
+  BIBLIO_COLUMNS.forEach(c => out[c] = '');
+
+  // Auto-detect source database from column names
+  // Remove BOM and normalise header names for detection
+  const normHeaders = headers.map(h => h.replace(/^[\uFEFF\ufeff"'\s]+|["'\s]+$/g, '').trim());
+  // additional databases (Dimensions, OpenAlex, Lens.org, PubMed CSV, WoS long-name Excel, Bibliometrix exports)
+  const extSrc = detectExtSource(normHeaders);
+  if (extSrc) return mapExtSource(rec, extSrc, normHeaders);
+  // Scopus CSV: has 'EID', 'Source title', 'Cited by', 'Author Keywords'
+  const isScopus = normHeaders.some(h =>
+    ['EID','Source title','Cited by','Author Keywords','Index Keywords',
+     'Abbreviated Source Title','Authors with affiliations'].includes(h));
+  // WoS CSV: has 'UT', 'WC' (Web-of-Science-Categories header abbreviation)
+  // Note: WoS also has 'TI','AU','PY' but those are too generic
+  const isWoS = !isScopus && normHeaders.some(h =>
+    ['UT','WC','AU_UN','AU1_UN','web.of.science.categories.'].includes(h) ||
+    (h === 'TI' && normHeaders.includes('UT')));
+
+  if (isScopus) {
+    // ── Scopus CSV mapping (all 45 Scopus export columns) ────────────────────
+    out.TI  = rec['Title'] || rec['TI'] || '';
+    // AU: abbreviated "SURNAME I" format from "Authors" field
+    out.AU  = (rec['Authors'] || rec['AU'] || '').trim();
+    // AF: full author names from "Author full names" (strip Scopus author IDs)
+    out.AF  = (rec['Author full names'] || rec['AF'] || out.AU)
+                .replace(/\s*\(\d+\)/g, '').trim();
+    out.AB  = rec['Abstract'] || rec['AB'] || '';
+    out.SO  = rec['Source title'] || rec['SO'] || '';
+    out.J9  = (rec['Abbreviated Source Title'] || rec['J9'] || '').trim();
+    out.JI  = out.J9;
+    out.PY  = rec['Year'] || rec['PY'] || '';
+    out.DI  = (rec['DOI'] || rec['DI'] || '').trim();
+    // DE = Author Keywords, ID = Index Keywords (Scopus-specific names)
+    out.DE  = rec['Author Keywords'] || rec['DE'] || '';
+    out.ID  = rec['Index Keywords'] || rec['ID'] || '';
+    out.TC  = rec['Cited by'] || rec['TC'] || '';
+    out.VL  = rec['Volume'] || rec['VL'] || '';
+    out.PN  = rec['Issue'] || rec['PN'] || '';
+    out.AR  = rec['Art. No.'] || rec['AR'] || '';
+    // PP: Page start - Page end
+    const ps = rec['Page start'] || ''; const pe = rec['Page end'] || '';
+    out.PP  = ps ? (pe && pe !== ps ? ps+'-'+pe : ps) : (rec['PP'] || '');
+    out.SN  = rec['ISSN'] || rec['SN'] || '';
+    out.BN  = rec['ISBN'] || rec['BN'] || '';
+    out.LA  = rec['Language of Original Document'] || rec['LA'] || 'ENGLISH';
+    out.DT  = rec['Document Type'] || rec['DT'] || '';
+    // C1 = institutional affiliations (raw Scopus "Affiliations" field)
+    out.C1  = rec['Affiliations'] || rec['C1'] || '';
+    // affiliations = "Authors with affiliations" (author+institution pairs)
+    out.affiliations = rec['Authors with affiliations'] || rec['affiliations'] || out.C1;
+    out.RP  = rec['Correspondence Address'] || rec['RP'] || '';
+    // EM: extract email from Correspondence Address (contains "email: x@y.z")
+    const emM = (rec['Correspondence Address']||'').match(/email:\s*([^;\s,]+)/i);
+    out.EM  = emM ? emM[1] : (rec['EM'] || '');
+    out.FU  = rec['Funding Details'] || rec['FU'] || '';
+    out.FX  = rec['Funding Texts'] || rec['FX'] || '';
+    out.BE  = rec['Editors'] || rec['BE'] || '';
+    out.CR  = rec['References'] || rec['CR'] || '';
+    out.NR  = out.CR ? String(out.CR.split(';').filter(Boolean).length) : '';
+    out.PU  = rec['Publisher'] || rec['PU'] || '';
+    // oa = Open Access status
+    out.oa  = rec['Open Access'] || rec['oa'] || '';
+    // note = Cited by count from EID metadata (not a separate Scopus CSV field)
+    // PM = PubMed ID
+    const pmVal = rec['PubMed ID'] || rec['pmid'] || '';
+    out.note = pmVal ? 'PMID:'+pmVal : '';
+    out.UT  = rec['EID'] || rec['UT'] || '';
+    out.organization = (rec['Author(s) ID'] || '').trim();
+    out.DB  = 'SCOPUS';
+  } else if (isWoS) {
+    // ── Web of Science CSV mapping ────────────────────────────────────────────
+    out.TI  = rec['TI'] || rec['Title'] || '';
+    out.AU  = rec['AU'] || rec['Authors'] || '';
+    out.AB  = rec['AB'] || rec['Abstract'] || '';
+    out.SO  = rec['SO'] || rec['Source'] || '';
+    out.J9  = rec['J9'] || '';
+    out.JI  = rec['JI'] || '';
+    out.PY  = rec['PY'] || rec['Year'] || '';
+    out.DI  = (rec['DI'] || rec['DOI'] || '').trim();
+    out.DE  = rec['DE'] || '';
+    out.ID  = rec['ID'] || '';
+    out.TC  = rec['TC'] || rec['Times Cited, All Databases'] || '';
+    out.VL  = rec['VL'] || '';
+    out.PP  = rec['BP'] ? rec['BP'] + (rec['EP'] ? '-'+rec['EP'] : '') : rec['PP'] || '';
+    out.SN  = rec['SN'] || '';
+    out.LA  = rec['LA'] || 'ENGLISH';
+    out.DT  = rec['DT'] || '';
+    out.C1  = rec['C1'] || '';
+    out.RP  = rec['RP'] || '';
+    out.EM  = rec['EM'] || '';
+    out.FU  = rec['FU'] || '';
+    out.FX  = rec['FX'] || '';
+    out.CR  = rec['CR'] || '';
+    out.NR  = rec['NR'] || '';
+    out.PU  = rec['PU'] || '';
+    out.PA  = rec['PA'] || '';
+    out.SC  = rec['SC'] || '';
+    out.UT  = rec['UT'] || '';
+    out.AU_UN  = rec['C3'] || '';
+    out.AU1_UN = rec['C3'] ? rec['C3'].split(';')[0].trim() : '';
+    out['web.of.science.categories.'] = rec['WC'] || '';
+    out['orcid.numbers'] = rec['OI'] || '';
+    out['researcherid.numbers'] = rec['RI'] || '';
+    out['usage.count.last.180.days'] = rec['U1'] || '';
+    out.U2  = rec['U2'] || '';
+    out.earlyaccessdate = rec['early_access_date'] || rec['earlyaccessdate'] || '';
+    out.month = rec['month'] || '';
+    out.SE  = rec['SE'] || '';
+    out.note = rec['note'] || '';
+    out.AF  = rec['AF'] || out.AU || '';
+    out.organization = rec['C3'] || out.AU_UN || '';
+    out.DB  = 'ISI';
+  } else {
+    // ── Generic / unknown source ──────────────────────────────────────────────
+    out.TI  = rec['Title'] || rec['TI'] || rec['title'] || '';
+    out.AU  = rec['Authors'] || rec['AU'] || rec['author'] || '';
+    out.AB  = rec['Abstract'] || rec['AB'] || rec['abstract'] || '';
+    out.SO  = rec['Source'] || rec['SO'] || rec['journal'] || rec['Journal'] || '';
+    out.PY  = rec['Year'] || rec['PY'] || rec['year'] || '';
+    out.DI  = (rec['DOI'] || rec['DI'] || rec['doi'] || '').trim();
+    out.DE  = rec['Keywords'] || rec['Author Keywords'] || rec['DE'] || '';
+    out.TC  = rec['Times Cited'] || rec['TC'] || '';
+    out.VL  = rec['Volume'] || rec['VL'] || '';
+    out.SN  = rec['ISSN'] || rec['SN'] || '';
+    out.LA  = rec['Language'] || rec['LA'] || 'ENGLISH';
+    out.DT  = rec['Document Type'] || rec['DT'] || '';
+    out.AF  = out.AU || '';
+    out.organization = '';
+    out.DB  = (db || 'UNKNOWN').toUpperCase();
+  }
+
+  if (!out.PY) out.PY = '';
+  return enforceSchema(out);
+}
+
+
+
+// ══════════════════════════════════════════════════════════════
+// STAGE 1 — MULTI-DATABASE SOURCE SUPPORT 
+// Bibliometrix-compatible readers for every export format of:
+//   Web of Science (plaintext .txt, tab-delimited, Excel long-names, BibTeX, RIS)
+//   Scopus (CSV, BibTeX, RIS) · Dimensions (CSV / XLSX / BibTeX)
+//   OpenAlex (website CSV, API JSON, openalexR / Bibliometrix exports)
+//   Lens.org (CSV) · PubMed (MEDLINE / .nbib / CSV) · Cochrane Library (plaintext)
+// Every reader ends in enforceSchema() → 59-column Bibliometrix record.
+// ══════════════════════════════════════════════════════════════
+
+const DB_LABELS = {
+  SCOPUS: 'Scopus', ISI: 'WOS', WOS: 'WOS', DIMENSIONS: 'Dimensions', OPENALEX: 'OpenAlex',
+  LENS: 'Lens.org', PUBMED: 'PubMed', COCHRANE: 'Cochrane', BIBLIOMETRIX: 'Bibliometrix', OTHER: 'Other'
+};
+const DB_ORDER = ['Scopus', 'WOS', 'Dimensions', 'OpenAlex', 'Lens.org', 'PubMed', 'Cochrane', 'Bibliometrix', 'Other'];
+function dbLabelOf(code) { return DB_LABELS[String(code || '').toUpperCase()] || String(code || 'Other'); }
+// Source code (SCOPUS / WOS / DIMENSIONS / …) of a parsed record, with a fallback for generic records
+function srcCodeOf(rec, fallback) {
+  const db = String(rec.DB || '').toUpperCase();
+  if (!db || db === 'UNKNOWN' || db === 'AUTO' || db === 'OTHER') return fallback || 'OTHER';
+  if (db === 'ISI') return 'WOS';
+  return db;
+}
+
+// ── Author-name normalisation → Bibliometrix "SURNAME IN" ─────────────────────
+// Handles "Silva, João A." · "Silva, JA" · "João A. Silva" · "Silva JA" · "Silva J.A."
+function normAuthorName(a) {
+  a = String(a || '').replace(/\([^)]*\)/g, '').replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim();
+  if (!a) return '';
+  const clean = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Za-z\s'\-]/g, '').toUpperCase().trim();
+  let last, rest;
+  if (a.includes(',')) {
+    const p = a.split(',');
+    last = p[0].trim(); rest = p.slice(1).join(' ').trim();
+  } else {
+    const parts = a.split(' ');
+    if (parts.length === 1) return clean(a);
+    const lastTok = parts[parts.length - 1];
+    const isInit = t => /^[A-Z]{1,3}$/.test(t.replace(/[.\-]/g, ''));
+    if (isInit(lastTok) && !isInit(parts[0])) { last = parts.slice(0, -1).join(' '); rest = lastTok; }   // "Silva JA" / "Silva J.A."
+    else { last = lastTok; rest = parts.slice(0, -1).join(' '); }                                          // "João A. Silva"
+  }
+  const initials = rest.replace(/[.\-]/g, ' ').split(/\s+/).filter(Boolean)
+    .map(t => /^[A-Z]{2,3}$/.test(t) ? t : t[0]).join('');
+  const L = clean(last), I = clean(initials);
+  return (L + (I ? ' ' + I : '')).trim();
+}
+function normAuthorList(s, sepRx) {
+  return String(s || '').split(sepRx || /;/).map(normAuthorName).filter(Boolean).join(';');
+}
+
+// Guess the originating database from free text (BibTeX / RIS dropped in the "Other" zone)
+function guessDbFromText(text, fallback) {
+  const t = text.slice(0, 20000).toLowerCase();
+  if (/dimensions\.ai|dimensions_|app\.dimensions/.test(t)) return 'DIMENSIONS';
+  if (/lens\.org|lens id/.test(t)) return 'LENS';
+  if (/openalex\.org|openalex/.test(t)) return 'OPENALEX';
+  if (/cochrane/.test(t)) return 'COCHRANE';
+  if (/pubmed|medline|ncbi\.nlm\.nih\.gov/.test(t)) return 'PUBMED';
+  if (/wos:|web of science|clarivate|isi web/.test(t)) return 'WOS';
+  if (/scopus/.test(t)) return 'SCOPUS';
+  return fallback || 'OTHER';
+}
+
+// Identify the layout of a text file by its content, not its extension
+function sniffTextFormat(text) {
+  const head = text.slice(0, 6000);
+  if (/^﻿?FN\s+(Clarivate|Thomson|ISI)/i.test(head) || (/^PT\s+[JBSCP]\s*$/m.test(head) && /^ER\s*$/m.test(text) && /^(AU|TI|PY)\s/m.test(head))) return 'wos';
+  if (/^PMID-\s*\d+/m.test(head) && /^(TI|AU|DP)\s{1,2}-\s/m.test(head)) return 'pubmed';
+  if (/^Record\s+#\d+\s+of\s+\d+/mi.test(head) && /^(TI|AU|SO|YR):\s/m.test(head)) return 'cochrane';
+  if (/^TY\s{1,2}-\s/m.test(head) && /^ER\s{1,2}-/m.test(text)) return 'ris';
+  if (/^\s*@[A-Za-z]+\s*[{(]/m.test(head)) return 'bib';
+  if (/^\s*[\[{]/.test(head)) return 'json';
+  return 'csv';
+}
+
+// ── Header-based source detection for tabular files (CSV / XLSX) ──────────────
+// Returns a source code handled by mapExtSource(), or null to fall back to the
+// original Scopus / WoS / generic mapping in mapToLibrometrix().
+function detectExtSource(h) {
+  const set = new Set(h);
+  const lower = new Set(h.map(x => x.toLowerCase()));
+  const has = (...n) => n.some(x => set.has(x));
+  const hasL = (...n) => n.some(x => lower.has(x.toLowerCase()));
+  if (has('Lens ID') || (has('Author/s') && has('Source Title') && has('Publication Year'))) return 'LENS';
+  if (has('Publication ID') && (has('PubYear') || has('Dimensions URL') || has('Authors Affiliations') || has('Times cited') || has('Source title'))) return 'DIMENSIONS';
+  if (has('PMID') && (has('Journal/Book') || has('Create Date') || has('First Author'))) return 'PUBMED';
+  if (has('Article Title') && has('Source Title') && (has('UT (Unique WOS ID)') || has('Publication Type') || has('Addresses') || has('Times Cited, WoS Core'))) return 'WOS_LONG';
+  if (has('SR') || has('SR_FULL') || has('AU_UN') || (has('DB') && has('TI') && has('AU') && has('PY'))) return 'BIBLIOMETRIX';
+  if (hasL('cited_by_count') || hasL('publication_year') || hasL('authorships.author.display_name') ||
+      hasL('primary_location.source.display_name') || (hasL('display_name') && (hasL('so') || hasL('ab') || hasL('doi')))) return 'OPENALEX';
+  return null;
+}
+
+// Build a Bibliometrix-style C1 (affiliation string per author/organisation, separated by ';')
+function zipAffiliations(orgs, cities, countries) {
+  const n = Math.max(orgs.length, countries.length);
+  const parts = [];
+  for (let i = 0; i < n; i++) {
+    const seg = [orgs[i] || '', cities[i] || '', countries[i] || countries[countries.length - 1] || ''].filter(Boolean);
+    if (seg.length) parts.push(seg.join(', '));
+  }
+  return parts.join('; ');
+}
+function reconstructAbstract(inv) {
+  try {
+    const idx = typeof inv === 'string' ? JSON.parse(inv) : inv;
+    if (!idx || typeof idx !== 'object') return '';
+    const words = [];
+    for (const [w, poss] of Object.entries(idx)) (poss || []).forEach(p => { words[p] = w; });
+    return words.filter(Boolean).join(' ');
+  } catch { return ''; }
+}
+
+// ── Column mapping for the additional tabular sources ─────────────────────────
+function mapExtSource(rec, src, headers) {
+  const out = {}; BIBLIO_COLUMNS.forEach(c => out[c] = '');
+  const lower = {}; headers.forEach(h => { lower[String(h).toLowerCase()] = h; });
+  const g = (...names) => {
+    for (const n of names) {
+      const k = (n in rec) ? n : lower[String(n).toLowerCase()];
+      if (k !== undefined && rec[k] !== undefined && rec[k] !== null && String(rec[k]).trim() !== '') return String(rec[k]).trim();
+    }
+    return '';
+  };
+  const list = (s, rx) => String(s || '').split(rx || /;/).map(x => x.trim()).filter(Boolean);
+  const year = s => { const m = String(s || '').match(/(19|20)\d{2}/); return m ? m[0] : ''; };
+  const pages = (a, b) => a ? (b && b !== a ? a + '-' + b : a) : '';
+  const stripDoi = d => String(d || '').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').replace(/^doi:\s*/i, '').trim();
+
+  switch (src) {
+
+    case 'BIBLIOMETRIX': {
+      // A Bibliometrix / openalexR→convert2df export already uses the 59-column names
+      BIBLIO_COLUMNS.forEach(c => { const v = g(c); if (v) out[c] = v; });
+      if (!out.DB) out.DB = 'BIBLIOMETRIX';
+      if (!out.C1 && out.affiliations) out.C1 = out.affiliations;
+      break;
+    }
+
+    case 'WOS_LONG': {
+      // Web of Science Excel / "Full Record" export with long column names
+      out.TI = g('Article Title', 'Title');
+      out.AU = g('Authors');
+      out.AF = g('Author Full Names') || out.AU;
+      out.BE = g('Book Editors');
+      out.SO = g('Source Title');
+      out.LA = g('Language') || 'ENGLISH';
+      out.DT = g('Document Type');
+      out.DE = g('Author Keywords');
+      out.ID = g('Keywords Plus');
+      out.AB = g('Abstract');
+      out.C1 = g('Addresses');
+      out.AU_UN = g('Affiliations');
+      out.AU1_UN = out.AU_UN ? out.AU_UN.split(';')[0].trim() : '';
+      out.RP = g('Reprint Addresses');
+      out.EM = g('Email Addresses');
+      out['orcid.numbers'] = g('ORCIDs');
+      out['researcherid.numbers'] = g('Researcher Ids');
+      out.FU = g('Funding Orgs');
+      out.FX = g('Funding Text');
+      out.CR = g('Cited References');
+      out.NR = g('Cited Reference Count');
+      out.TC = g('Times Cited, WoS Core', 'Times Cited, All Databases');
+      out['usage.count.last.180.days'] = g('180 Day Usage Count');
+      out.U2 = g('Since 2013 Usage Count');
+      out.PU = g('Publisher');
+      out.PA = g('Publisher Address', 'Publisher City');
+      out.SN = g('ISSN');
+      out.eissn = g('eISSN');
+      out.BN = g('ISBN');
+      out.J9 = g('Journal Abbreviation');
+      out.JI = g('Journal ISO Abbreviation');
+      out.month = g('Publication Date');
+      out.PY = g('Publication Year') || year(g('Publication Date'));
+      out.VL = g('Volume');
+      out.PN = g('Issue');
+      out.PP = pages(g('Start Page'), g('End Page'));
+      out.AR = g('Article Number');
+      out.DI = stripDoi(g('DOI'));
+      out.earlyaccessdate = g('Early Access Date');
+      out['web.of.science.categories.'] = g('WoS Categories');
+      out.SC = g('Research Areas');
+      out['web.of.science.index'] = g('Web of Science Index');
+      out.UT = g('UT (Unique WOS ID)', 'Accession Number');
+      const pm = g('Pubmed Id'); if (pm) out.note = 'PMID:' + pm;
+      out.oa = g('Open Access Designations');
+      out.SE = g('Book Series Title');
+      out.GA = g('IDS Number');
+      out.DB = 'ISI';
+      break;
+    }
+
+    case 'DIMENSIONS': {
+      out.TI = g('Title');
+      out.AB = g('Abstract');
+      const rawAu = g('Authors');
+      out.AU = normAuthorList(rawAu, /;/);
+      out.AF = rawAu;
+      out.SO = g('Source title', 'Anthology title', 'Source title/Anthology title');
+      out.PY = g('PubYear') || year(g('Publication date', 'Publication Date', 'Publication date (print)', 'Publication date (online)'));
+      out.month = g('Publication date', 'Publication Date');
+      out.VL = g('Volume');
+      out.PN = g('Issue');
+      out.PP = g('Pagination');
+      out.DI = stripDoi(g('DOI'));
+      out.TC = g('Times cited', 'Times Cited');
+      out.DT = g('Publication Type');
+      out.ID = g('MeSH terms');
+      out.SC = g('Fields of Research (ANZSRC 2020)', 'FOR (ANZSRC) Categories', 'Fields of Research (ANZSRC 2020) Categories');
+      out.FU = g('Funder', 'Funder Group');
+      out.FX = g('Funding', 'Acknowledgements');
+      out.oa = g('Open Access');
+      out.BN = g('ISBN');
+      out.UT = g('Publication ID');
+      out.PU = g('Publisher');
+      const pm = g('PMID'); if (pm) out.note = 'PMID:' + pm;
+      // Affiliations: standardised organisations × city × country → "Org, City, Country; …"
+      const orgs = list(g('Research Organizations - standardized', 'Research Organizations - standardised'));
+      const cities = list(g('City of Research organization', 'City of Research organisation'));
+      const countries = list(g('Country of Research organization', 'Country of Research organisation'));
+      out.C1 = orgs.length ? zipAffiliations(orgs, cities, countries) : g('Authors (Raw Affiliation)', 'Authors Affiliations');
+      out.affiliations = g('Authors Affiliations', 'Authors (Raw Affiliation)') || out.C1;
+      out.AU_UN = orgs.join(';');
+      out.AU1_UN = orgs[0] || '';
+      out.RP = g('Corresponding Authors', 'Corresponding Author');
+      out.DB = 'DIMENSIONS';
+      break;
+    }
+
+    case 'LENS': {
+      out.TI = g('Title');
+      out.AB = g('Abstract');
+      const rawAu = g('Author/s', 'Authors');
+      out.AU = normAuthorList(rawAu, /;/);
+      out.AF = rawAu;
+      out.SO = g('Source Title');
+      out.PY = g('Publication Year') || year(g('Date Published'));
+      out.month = g('Date Published');
+      out.VL = g('Volume');
+      out.PN = g('Issue Number');
+      out.PP = pages(g('Start Page'), g('End Page'));
+      out.DI = stripDoi(g('DOI'));
+      out.TC = g('Citing Works Count', 'Scholarly Citation Count', 'Citing Scholarly Works Count');
+      out.DT = g('Publication Type');
+      out.DE = g('Keywords');
+      out.ID = g('MeSH Terms');
+      out.SC = g('Fields of Study');
+      out.SN = g('ISSNs');
+      out.PU = g('Publisher');
+      out.PA = g('Source Country');
+      out.FU = g('Funding');
+      out.oa = g('Is Open Access', 'Open Access Colour');
+      out.UT = g('Lens ID');
+      out.CR = g('References');
+      const pm = g('PMID'); if (pm) out.note = 'PMID:' + pm;
+      out.DB = 'LENS';
+      break;
+    }
+
+    case 'PUBMED': {
+      // PubMed "Save → CSV" export
+      out.TI = g('Title');
+      out.AU = normAuthorList(g('Authors'), /,\s*/);
+      out.AF = g('Authors');
+      out.SO = g('Journal/Book');
+      out.PY = g('Publication Year') || year(g('Create Date'));
+      out.DI = stripDoi(g('DOI'));
+      const pmid = g('PMID');
+      out.UT = pmid; if (pmid) out.note = 'PMID:' + pmid;
+      const cit = g('Citation');            // e.g. "Remote Sens Environ. 2020 Apr;240:111234."
+      const vm = cit.match(/;\s*(\d+)\s*(?:\(([^)]*)\))?\s*:\s*([\w\-–]+)/);
+      if (vm) { out.VL = vm[1]; out.PN = vm[2] || ''; out.PP = vm[3]; }
+      out.DT = 'Article';
+      out.DB = 'PUBMED';
+      break;
+    }
+
+    case 'OPENALEX': {
+      mapOpenAlexRow(rec, g, out);
+      break;
+    }
+  }
+  if (!out.PY) out.PY = '';
+  return enforceSchema(out);
+}
+
+// OpenAlex flat row → Bibliometrix (shared by the website CSV, openalexR exports and the API JSON flattener)
+function mapOpenAlexRow(rec, g, out) {
+  const split = s => String(s || '').split(/\s*\|\s*|;\s*/).map(x => x.trim()).filter(Boolean);
+  const stripDoi = d => String(d || '').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').trim();
+  out.TI = g('title', 'display_name');
+  out.AB = g('ab', 'abstract') || reconstructAbstract(g('abstract_inverted_index'));
+  out.PY = g('publication_year') || (String(g('publication_date')).match(/\d{4}/) || [''])[0];
+  out.month = g('publication_date');
+  out.SO = g('primary_location.source.display_name', 'so', 'host_venue.display_name', 'source_display_name', 'source');
+  out.DI = stripDoi(g('doi', 'ids.doi'));
+  out.TC = g('cited_by_count');
+  out.DT = g('type');
+  out.LA = (g('language') || 'en').toUpperCase() === 'EN' ? 'ENGLISH' : g('language').toUpperCase();
+  out.VL = g('biblio.volume', 'volume');
+  out.PN = g('biblio.issue', 'issue');
+  const fp = g('biblio.first_page', 'first_page'), lp = g('biblio.last_page', 'last_page');
+  out.PP = fp ? (lp && lp !== fp ? fp + '-' + lp : fp) : '';
+  const rawAu = g('authorships.author.display_name', 'au_display_name', 'author_display_name', 'authors', 'author');
+  out.AU = split(rawAu).map(normAuthorName).filter(Boolean).join(';');
+  out.AF = split(rawAu).join(';');
+  const rawAff = g('authorships.raw_affiliation_strings', 'authorships.raw_affiliation_string', 'raw_affiliation_strings');
+  const inst = split(g('authorships.institutions.display_name', 'institution_display_name', 'institutions'));
+  const ctry = split(g('authorships.institutions.country_code', 'authorships.countries', 'institution_country_code'));
+  out.C1 = rawAff ? split(rawAff).join('; ') : zipAffiliations(inst, [], ctry);
+  out.affiliations = out.C1;
+  out.AU_UN = inst.join(';');
+  out.AU1_UN = inst[0] || '';
+  out.DE = split(g('keywords.display_name', 'keywords')).join('; ');
+  out.ID = split(g('concepts.display_name', 'concepts', 'topics.display_name')).join('; ');
+  out.UT = String(g('id', 'ids.openalex')).replace(/^https?:\/\/openalex\.org\//i, '');
+  out.oa = g('open_access.oa_status', 'oa_status') || g('open_access.is_oa', 'is_oa');
+  out.SN = g('primary_location.source.issn_l', 'issn_l');
+  out.PU = g('primary_location.source.host_organization_name', 'host_organization', 'host_organization_name');
+  const refs = g('referenced_works'); if (refs) out.NR = String(split(refs).length);
+  out['orcid.numbers'] = split(g('authorships.author.orcid')).join(';');
+  const pm = g('ids.pmid'); if (pm) out.note = 'PMID:' + String(pm).replace(/^https?:\/\/pubmed\.ncbi\.nlm\.nih\.gov\//i, '');
+  out.DB = 'OPENALEX';
+}
+
+// ── OpenAlex API JSON (single work, array of works, or {results:[…]}) ─────────
+function parseOpenAlexJSON(text) {
+  let json;
+  try { json = JSON.parse(text); } catch (e) { console.warn('OpenAlex JSON parse error', e); return []; }
+  const works = Array.isArray(json) ? json : (Array.isArray(json.results) ? json.results : (json.id ? [json] : []));
+  const records = [];
+  for (const w of works) {
+    if (!w || typeof w !== 'object') continue;
+    const auths = Array.isArray(w.authorships) ? w.authorships : [];
+    const flat = {
+      id: w.id || '', doi: w.doi || '', title: w.title || w.display_name || '',
+      publication_year: w.publication_year || '', publication_date: w.publication_date || '',
+      type: w.type || '', language: w.language || '', cited_by_count: w.cited_by_count ?? '',
+      'primary_location.source.display_name': w.primary_location?.source?.display_name || w.host_venue?.display_name || '',
+      'primary_location.source.issn_l': w.primary_location?.source?.issn_l || '',
+      'primary_location.source.host_organization_name': w.primary_location?.source?.host_organization_name || '',
+      'biblio.volume': w.biblio?.volume || '', 'biblio.issue': w.biblio?.issue || '',
+      'biblio.first_page': w.biblio?.first_page || '', 'biblio.last_page': w.biblio?.last_page || '',
+      'authorships.author.display_name': auths.map(a => a.author?.display_name || '').filter(Boolean).join('|'),
+      'authorships.author.orcid': auths.map(a => a.author?.orcid || '').filter(Boolean).join('|'),
+      'authorships.raw_affiliation_strings': auths.map(a => (a.raw_affiliation_strings || (a.raw_affiliation_string ? [a.raw_affiliation_string] : [])).join(', ')).filter(Boolean).join('|'),
+      'authorships.institutions.display_name': auths.flatMap(a => (a.institutions || []).map(i => i.display_name || '')).filter(Boolean).join('|'),
+      'authorships.institutions.country_code': auths.flatMap(a => (a.institutions || []).map(i => i.country_code || '')).filter(Boolean).join('|'),
+      'keywords.display_name': (w.keywords || []).map(k => k.display_name || k.keyword || '').filter(Boolean).join('|'),
+      'concepts.display_name': (w.concepts || []).map(c => c.display_name || '').filter(Boolean).join('|'),
+      'open_access.oa_status': w.open_access?.oa_status || '',
+      'ids.pmid': w.ids?.pmid || '',
+      referenced_works: (w.referenced_works || []).join('|'),
+      abstract_inverted_index: w.abstract_inverted_index ? JSON.stringify(w.abstract_inverted_index) : ''
+    };
+    const headers = Object.keys(flat);
+    const out = {}; BIBLIO_COLUMNS.forEach(c => out[c] = '');
+    const g = (...names) => { for (const n of names) if (flat[n] !== undefined && flat[n] !== null && String(flat[n]).trim() !== '') return String(flat[n]).trim(); return ''; };
+    mapOpenAlexRow(flat, g, out);
+    if (out.TI) records.push(enforceSchema(out));
+  }
+  return records;
+}
+
+// ── Web of Science plaintext ("Full Record" .txt) ─────────────────────────────
+function parseWoSPlain(text) {
+  const records = [];
+  const body = text.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  const entries = body.split(/\nER\s*\n/);
+  const MULTI = new Set(['AU', 'AF', 'BA', 'BF', 'CR', 'C1', 'C3', 'CA', 'GP', 'BE']);
+  for (const entry of entries) {
+    if (!/^(PT|AU|TI)\s/m.test(entry)) continue;
+    const fields = {}; let tag = null;
+    for (const line of entry.split('\n')) {
+      const m = line.match(/^([A-Z][A-Z0-9])\s(.*)$/);
+      if (m) { tag = m[1]; (fields[tag] = fields[tag] || []).push(m[2].trim()); }
+      else if (tag && /^\s{3}/.test(line)) fields[tag].push(line.trim());
+    }
+    const one = (t) => (fields[t] || []).join(' ').replace(/\s+/g, ' ').trim();
+    const many = (t) => (fields[t] || []).map(s => s.trim()).filter(Boolean).join(';');
+    const rec = {};
+    rec.TI = one('TI'); if (!rec.TI) continue;
+    rec.AU = many('AU');
+    rec.AF = many('AF') || rec.AU;
+    rec.BE = many('BE');
+    rec.SO = one('SO');
+    rec.SE = one('SE');
+    rec.LA = one('LA') || 'ENGLISH';
+    rec.DT = one('DT');
+    rec.DE = one('DE');
+    rec.ID = one('ID');
+    rec.AB = one('AB');
+    rec.C1 = many('C1').replace(/;/g, '; ');
+    rec.AU_UN = many('C3');
+    rec.AU1_UN = (fields.C3 || [])[0] || '';
+    rec.RP = one('RP');
+    rec.EM = one('EM');
+    rec['researcherid.numbers'] = one('RI');
+    rec['orcid.numbers'] = one('OI');
+    rec.FU = one('FU');
+    rec.FX = one('FX');
+    rec.CR = many('CR');
+    rec.NR = one('NR') || (fields.CR ? String(fields.CR.length) : '');
+    rec.TC = one('TC') || one('Z9');
+    rec['usage.count.last.180.days'] = one('U1');
+    rec.U2 = one('U2');
+    rec.PU = one('PU');
+    rec.PA = one('PA') || one('PI');
+    rec.SN = one('SN');
+    rec.eissn = one('EI');
+    rec.BN = one('BN');
+    rec.J9 = one('J9');
+    rec.JI = one('JI');
+    rec.month = one('PD');
+    rec.PY = (one('PY').match(/\d{4}/) || [''])[0];
+    rec.VL = one('VL');
+    rec.PN = one('IS');
+    const bp = one('BP'), ep = one('EP');
+    rec.PP = bp ? (ep && ep !== bp ? bp + '-' + ep : bp) : '';
+    rec.AR = one('AR');
+    rec.DI = one('DI').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '');
+    rec.earlyaccessdate = one('EA');
+    rec['web.of.science.categories.'] = one('WC');
+    rec.SC = one('SC');
+    rec.GA = one('GA');
+    rec.UT = one('UT');
+    const pm = one('PM'); if (pm) rec.note = 'PMID:' + pm;
+    rec.oa = one('OA');
+    rec.DB = 'ISI';
+    records.push(enforceSchema(rec));
+  }
+  return records;
+}
+
+// ── PubMed / MEDLINE tagged format (.txt / .nbib) ─────────────────────────────
+function parsePubMed(text) {
+  const records = [];
+  const body = text.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  const entries = body.split(/\n\s*\n(?=PMID-)/);
+  for (const entry of entries) {
+    if (!/^PMID-/m.test(entry)) continue;
+    const fields = {}; let tag = null;
+    for (const line of entry.split('\n')) {
+      const m = line.match(/^([A-Z]{1,4})\s{0,3}-\s?(.*)$/);
+      if (m) { tag = m[1]; (fields[tag] = fields[tag] || []).push(m[2].trim()); }
+      else if (tag && /^\s{6}/.test(line)) fields[tag][fields[tag].length - 1] += ' ' + line.trim();
+    }
+    const one = (t) => (fields[t] || []).join(' ').replace(/\s+/g, ' ').trim();
+    const many = (t) => (fields[t] || []).map(s => s.trim()).filter(Boolean);
+    const rec = {};
+    rec.TI = one('TI').replace(/\.$/, ''); if (!rec.TI) continue;
+    rec.AU = many('AU').map(normAuthorName).filter(Boolean).join(';');
+    rec.AF = many('FAU').join(';') || rec.AU;
+    rec.AB = one('AB');
+    // AD: one affiliation per author (may contain e-mails and trailing periods)
+    rec.C1 = many('AD').map(a => a.replace(/\S+@\S+/g, '').replace(/\s*(Electronic address:)?\s*$/i, '').replace(/[.\s]+$/, '').trim()).filter(Boolean).join('; ');
+    rec.affiliations = rec.C1;
+    rec.PY = (one('DP').match(/\d{4}/) || [''])[0];
+    rec.month = one('DP');
+    rec.SO = (one('JT') || one('TA')).toUpperCase();
+    rec.J9 = one('TA').toUpperCase();
+    rec.JI = one('TA');
+    rec.VL = one('VI');
+    rec.PN = one('IP');
+    rec.PP = one('PG');
+    const doiLine = [...many('AID'), ...many('LID')].find(s => /\[doi\]/i.test(s)) || '';
+    rec.DI = doiLine.replace(/\s*\[doi\]/i, '').trim();
+    rec.DE = many('OT').join('; ');
+    rec.ID = many('MH').map(s => s.replace(/^\*/, '')).join('; ');
+    rec.DT = (many('PT')[0] || 'Article');
+    rec.LA = (one('LA') || 'eng').toLowerCase() === 'eng' ? 'ENGLISH' : one('LA').toUpperCase();
+    rec.SN = one('IS').replace(/\s*\(.*?\)/g, '').split(' ')[0];
+    rec.PA = one('PL');
+    rec.FU = many('GR').join('; ');
+    const pmid = one('PMID');
+    rec.UT = pmid; rec.note = pmid ? 'PMID:' + pmid : '';
+    rec.PU = '';
+    rec.DB = 'PUBMED';
+    records.push(enforceSchema(rec));
+  }
+  return records;
+}
+
+// ── Cochrane Library plaintext export ─────────────────────────────────────────
+function parseCochrane(text) {
+  const records = [];
+  const body = text.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  const entries = body.split(/^Record\s+#\d+\s+of\s+\d+\s*$/mi);
+  for (const entry of entries) {
+    if (!/^TI:\s/m.test(entry)) continue;
+    const fields = {}; let tag = null;
+    for (const line of entry.split('\n')) {
+      const m = line.match(/^([A-Z]{2,4}):\s?(.*)$/);
+      if (m) { tag = m[1]; (fields[tag] = fields[tag] || []).push(m[2].trim()); }
+      else if (tag && line.trim()) fields[tag][fields[tag].length - 1] += ' ' + line.trim();
+    }
+    const one = (t) => (fields[t] || []).join(' ').replace(/\s+/g, ' ').trim();
+    const rec = {};
+    rec.TI = one('TI'); if (!rec.TI) continue;
+    rec.AU = normAuthorList(one('AU'), /,\s*(?=[A-Z][a-z]|[A-Z]{2,})|;\s*/);
+    rec.AF = one('AU');
+    rec.SO = one('SO');
+    rec.PY = (one('YR').match(/\d{4}/) || [''])[0];
+    rec.VL = one('VL');
+    rec.PN = one('NO');
+    rec.PP = one('PG');
+    rec.DI = one('DOI').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '');
+    rec.DE = one('KY').replace(/\s*;\s*/g, '; ');
+    rec.AB = one('AB');
+    rec.DT = one('PT') || 'Article';
+    rec.UT = one('ID');
+    rec.LA = 'ENGLISH';
+    const pm = one('PM'); if (pm) rec.note = 'PMID:' + pm;
+    rec.EM = one('EM');
+    rec.CR = one('XR');
+    rec.DB = 'COCHRANE';
+    records.push(enforceSchema(rec));
+  }
+  return records;
+}
+
+// ── Whole-text CSV tokenizer (quoted fields may span several lines — Dimensions / Lens / Scopus) ──
+function csvToRows(text, sep) {
+  const rows = []; let row = [], cur = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else inQ = false; }
+      else cur += c;
+    } else if (c === '"') inQ = true;
+    else if (c === sep) { row.push(cur); cur = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(cur); rows.push(row); row = []; cur = '';
+    } else cur += c;
+  }
+  if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+  return rows;
+}
+
+// Replaces the line-based v8 parseCSV: delimiter detection (comma / tab), preamble
+// skipping (Dimensions "About the data" line) and multi-line quoted fields.
+function parseCSV(text, db) {
+  text = String(text || '').replace(/^﻿/, '');
+  const probe = text.split(/\r?\n/).slice(0, 30);
+  const sep = probe.some(l => l.split('\t').length >= 3) ? '\t' : ',';
+  const rows = csvToRows(text, sep);
+  let hIdx = rows.findIndex(r => r.filter(c => c.trim() !== '').length >= 3);
+  if (hIdx < 0) hIdx = 0;
+  const headers = (rows[hIdx] || []).map(h => h.replace(/^[﻿"'\s]+|["'\s]+$/g, '').trim());
+  const records = [];
+  for (let i = hIdx + 1; i < rows.length; i++) {
+    const vals = rows[i];
+    if (!vals.some(v => v.trim() !== '')) continue;
+    const rec = {};
+    headers.forEach((h, idx) => { if (h) rec[h] = (vals[idx] || '').trim(); });
+    records.push(mapToLibrometrix(rec, db, headers));
+  }
+  return records.filter(r => r.TI);
+}
+
+// Replaces v8 parseXLSX: header row may not be the first row (Dimensions exports).
+function parseXLSX(buffer, db) {
+  if (typeof XLSX === 'undefined') { console.warn('SheetJS not loaded — cannot parse XLSX'); return []; }
+  const wb = XLSX.read(buffer, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  if (!aoa.length) return [];
+  let hIdx = aoa.findIndex(r => r.filter(c => String(c).trim() !== '').length >= 3);
+  if (hIdx < 0) hIdx = 0;
+  const headers = aoa[hIdx].map(h => String(h).trim());
+  const out = [];
+  for (let i = hIdx + 1; i < aoa.length; i++) {
+    const row = aoa[i];
+    if (!row.some(c => String(c).trim() !== '')) continue;
+    const rec = {};
+    headers.forEach((h, j) => { if (h) rec[h] = (row[j] === undefined || row[j] === null) ? '' : String(row[j]).trim(); });
+    out.push(mapToLibrometrix(rec, db, headers));
+  }
+  return out.filter(r => r.TI);
+}
+
+// ===================== DEDUPLICATION =====================
+function normalizeTitle(t) {
+  return (t||'').toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\b(the|a|an|of|in|on|for|with|and|or|to|from|by|is|are|at|as)\b/g, '')
+    .replace(/\s+/g, ' ').trim();
+}
+
+function jaroWinkler(s1, s2) {
+  if (s1 === s2) return 1;
+  if (!s1.length || !s2.length) return 0;
+  const len1 = s1.length, len2 = s2.length;
+  const matchDist = Math.max(Math.floor(Math.max(len1, len2) / 2) - 1, 0);
+  const s1m = new Array(len1).fill(false);
+  const s2m = new Array(len2).fill(false);
+  let matches = 0, transpositions = 0;
+  for (let i = 0; i < len1; i++) {
+    const start = Math.max(0, i - matchDist);
+    const end = Math.min(i + matchDist + 1, len2);
+    for (let j = start; j < end; j++) {
+      if (s2m[j] || s1[i] !== s2[j]) continue;
+      s1m[i] = s2m[j] = true; matches++; break;
+    }
+  }
+  if (!matches) return 0;
+  let k = 0;
+  for (let i = 0; i < len1; i++) {
+    if (!s1m[i]) continue;
+    while (!s2m[k]) k++;
+    if (s1[i] !== s2[k]) transpositions++;
+    k++;
+  }
+  const jaro = (matches / len1 + matches / len2 + (matches - transpositions / 2) / matches) / 3;
+  let prefix = 0;
+  for (let i = 0; i < Math.min(4, Math.min(len1, len2)); i++) {
+    if (s1[i] === s2[i]) prefix++; else break;
+  }
+  return jaro + prefix * 0.1 * (1 - jaro);
+}
+
+// Normalise DOI: strip protocol/domain prefixes, lowercase, trim
+function normDOI(d) {
+  return (d||'').toLowerCase()
+    .replace(/^https?:\/\/(dx\.)?doi\.org\//,'')
+    .replace(/^doi:/,'')
+    .trim();
+}
+
+// Build a fingerprint key from first-author surname + year + first 6 title words
+function fingerprint(rec) {
+  const surname = (rec.AU||'').split(';')[0].split(',')[0].trim().toLowerCase().replace(/[^a-z]/g,'');
+  const year = (rec.PY||'').toString().trim();
+  const words = normalizeTitle(rec.TI).split(' ').slice(0,6).join('');
+  return `${surname}|${year}|${words}`;
+}
+
+/*
+ * deduplicate()
+ * ─────────────
+ * Strategy: CONSERVATIVE — only flag as duplicate when TWO independent
+ * signals agree, preventing false positives when files are simply split
+ * by query/date range from the same database.
+ *
+ * A record is a duplicate if ANY of the following hold:
+ *   1. DOI exact match (after normalisation) — only when BOTH records have a DOI
+ *   2. Title similarity ≥ 92% AND same publication year  (raised from 85%)
+ *   3. Fingerprint exact match (surname + year + first-6-title-words)
+ *      AND title similarity ≥ 80%
+ *
+ * Intra-database splitting (same DB, different files) is intentionally
+ * NOT treated as duplication unless the above conditions are met.
+ */
+function deduplicate(scopusRecs, wosRecs, otherRecs = []) {
+  const doDedup   = document.getElementById('dedup-doi').checked;
+  const doTitle   = document.getElementById('dedup-title').checked;
+  const doAuthYear= document.getElementById('dedup-authyear').checked;
+
+  const all = [
+    ...scopusRecs.map(r => ({...r, _db:'scopus'})),
+    ...wosRecs.map(r   => ({...r, _db:'wos'})),
+    ...otherRecs.map(r => ({...r, _db: String(r._srcDB || srcCodeOf(r, 'OTHER')).toLowerCase()}))
+  ];
+
+  const kept    = [];
+  const dupLog  = [];
+  const doiMap  = new Map();        // normDOI → index in kept
+  const fpMap   = new Map();        // fingerprint → index in kept
+  const titleArr= [];               // {norm, idx} for fuzzy search
+
+  // v6: normalise a record's DB code to display form
+  const dbLabel = (db) => dbLabelOf(db);   // Scopus / WOS / Dimensions / OpenAlex / Lens.org / PubMed / Cochrane
+
+  for (const rec of all) {
+    const doi  = normDOI(rec.DI);
+    const norm = normalizeTitle(rec.TI);
+    const fp   = fingerprint(rec);
+    const yr   = (rec.PY||'').toString().trim();
+    let isDup = false, dupReason = '', matchIdx = -1;   // v6: matchIdx = kept row it duplicates
+
+    // --- Signal 1: DOI exact match (only when both sides have a DOI) ---
+    if (doDedup && doi) {
+      if (doiMap.has(doi)) {
+        isDup = true;
+        dupReason = 'Identical DOI';
+        matchIdx = doiMap.get(doi);
+      }
+    }
+
+    // --- Signal 2: High-confidence title similarity + same year ---
+    if (!isDup && doTitle && norm.length > 10) {
+      for (const {n, y, idx} of titleArr) {
+        const sim = jaroWinkler(norm, n);
+        if (sim >= 0.92 && yr && y && yr === y) {
+          isDup = true;
+          dupReason = `Title ≥92% similar + same year (${Math.round(sim*100)}%)`;
+          matchIdx = idx;
+          break;
+        }
+      }
+    }
+
+    // --- Signal 3: Fingerprint + moderate title similarity ---
+    if (!isDup && doAuthYear && fpMap.has(fp)) {
+      const keptIdx = fpMap.get(fp);
+      const keptNorm = titleArr.find(t => t.idx === keptIdx)?.n || '';
+      if (keptNorm && jaroWinkler(norm, keptNorm) >= 0.80) {
+        isDup = true;
+        dupReason = 'Concordant author + year + title';
+        matchIdx = keptIdx;
+      }
+    }
+
+    if (!isDup) {
+      const idx = kept.length;
+      rec._sourceDBs = new Set([dbLabel(rec._db)]);   // v6: DBs that contributed to this unique record
+      kept.push(rec);
+      if (doi)       doiMap.set(doi, idx);
+      if (fp)        fpMap.set(fp, idx);
+      if (norm)      titleArr.push({n: norm, y: yr, idx});
+    } else {
+      // v6: fold the duplicate's DB into the surviving record's origin set
+      if (matchIdx >= 0 && kept[matchIdx] && kept[matchIdx]._sourceDBs) {
+        kept[matchIdx]._sourceDBs.add(dbLabel(rec._db));
+      }
+      dupLog.push({...rec, _dupReason: dupReason,
+        _mergedIntoUID: (matchIdx >= 0 && kept[matchIdx]) ? (kept[matchIdx]._rawUID || '') : ''});
+    }
+  }
+
+  // v6: resolve the DB_Origin label for every surviving record
+  kept.forEach(rec => {
+    const dbs = rec._sourceDBs ? [...rec._sourceDBs] : [dbLabel(rec._db)];
+    const hasS = dbs.includes('Scopus'), hasW = dbs.includes('WOS');
+    rec.DB_Origin = [...new Set(dbs)].sort((a, b) => DB_ORDER.indexOf(a) - DB_ORDER.indexOf(b)).join('/');   // multi-source origin
+  });
+
+  return { kept, dupLog };
+}
+
+
+// ===================== XLSX EXPORT (Stage 1 outputs) =====================
+// Safe download — works in all contexts including sandboxed iframes
+function xlsxDownload(wb, filename) {
+  try {
+    const wbArray = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([wbArray], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 3000);
+    showToast('⬇ Download: ' + filename);
+  } catch(e) {
+    // Final fallback: base64 data URI (works even in sandboxed iframes)
+    try {
+      const wbBase64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+      const dataURI = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,' + wbBase64;
+      const a = document.createElement('a');
+      a.href = dataURI;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => document.body.removeChild(a), 1000);
+      showToast('⬇ Download: ' + filename);
+    } catch(e2) {
+      showToast('❌ Download failed — check the console');
+      console.error('xlsxDownload failed:', e2);
+    }
+  }
+}
+
+// Truncate heavy text fields to prevent browser hang on large datasets
+// AB_raw keeps full text; AB is capped for display in Excel
+// sanitiseForExport — truncates heavy fields before writing to XLSX/CSV.
+// Column order follows BIBLIO_COLUMNS (59-col reference schema).
+function sanitiseForExport(rec) {
+  const out = {};
+  BIBLIO_COLUMNS.forEach(col => {
+    let val = rec[col] !== undefined && rec[col] !== null ? String(rec[col]) : '';
+    // Truncate known heavy fields to Excel cell limits (32 767 chars max)
+    if ((col === 'AB' || col === 'AB_raw') && val.length > 2000) val = val.slice(0, 2000) + '…';
+    if (col === 'CR' && val.length > 3000)   val = val.slice(0, 3000) + '…';
+    if (col === 'C1' && val.length > 1000)   val = val.slice(0, 1000) + '…';
+    if (col === 'affiliations' && val.length > 1000) val = val.slice(0, 1000) + '…';
+    if (val.length > 5000)                   val = val.slice(0, 5000) + '…';
+    out[col] = val;
+  });
+  return out;
+}
+
+function buildBiblioWorkbook(data, sheetName) {
+  const name = (sheetName || 'Sheet 1').slice(0, 31); // Excel sheet name limit
+  const ws_data = [BIBLIO_COLUMNS];
+  data.forEach(rec => {
+    const s = sanitiseForExport(rec);
+    ws_data.push(BIBLIO_COLUMNS.map(col => s[col]));
+  });
+  const ws = XLSX.utils.aoa_to_sheet(ws_data);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, name);
+  return wb;
+}
+
+function downloadIngestionXLSX() {
+  if (!state.mergedData.length) { showToast('No data to export'); return; }
+  showToast('Building XLSX…');
+  setTimeout(() => {
+    const wb = buildBiblioWorkbook(state.mergedData, 'Merged Dataset');
+    xlsxDownload(wb, 'stage1_merged_dataset.xlsx');
+  }, 50);
+}
+
+// v6: third Stage-1 output — every original field of the ingested (deduplicated)
+// corpus PLUS a DB_Origin column. Records found in a single base show "Scopus" or
+// "WOS"; records identified in BOTH bases during deduplication show "Scopus/WOS".
+function downloadSourceTaggedXLSX() {
+  if (!state.mergedData.length) { showToast('No data to export'); return; }
+  showToast('Building XLSX with DB origin…');
+  setTimeout(() => {
+    const cols = [...BIBLIO_COLUMNS, 'DB_Origin'];
+    const ws_data = [cols];
+    state.mergedData.forEach(rec => {
+      const s = sanitiseForExport(rec);
+      const row = BIBLIO_COLUMNS.map(c => s[c]);
+      row.push(rec.DB_Origin || dbLabelOf(rec._srcDB || srcCodeOf(rec, 'Scopus')));
+      ws_data.push(row);
+    });
+    const ws = XLSX.utils.aoa_to_sheet(ws_data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Merged + DB Origin');
+    xlsxDownload(wb, 'stage1_merged_db_origin.xlsx');
+    const both = state.mergedData.filter(r => (r.DB_Origin || '').includes('/')).length;
+    showToast(`XLSX ready — ${both} record(s) found in more than one database`);
+  }, 50);
+}
+
+function downloadAuditXLSX() {
+  if (!state.duplicates.length) { showToast('No duplicates found'); return; }
+  showToast('Building the audit log…');
+  setTimeout(() => {
+    const dataKeys = [...BIBLIO_COLUMNS, '_dupReason'];
+    const headerRow = [...BIBLIO_COLUMNS, 'Duplicate reason'];
+    const ws_data = [headerRow, ...state.duplicates.map(r => dataKeys.map(c => {
+      let v = r[c] || '';
+      if (v.length > 2000) v = v.slice(0, 2000) + '…';
+      return v;
+    }))];
+    const ws = XLSX.utils.aoa_to_sheet(ws_data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Duplicates Audit');
+    xlsxDownload(wb, 'stage1_audit_duplicates.xlsx');
+  }, 50);
+}

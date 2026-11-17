@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Bibliometric Figure Generator · Q1</title>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/topojson/3.0.2/topojson.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<link rel="stylesheet" href="css/styles.css"/>
+</head>
+<body>
+<div id="tt"></div>
+<div id="toast"><span id="toast-msg"></span></div>
+
+<!-- ═══ SIDEBAR ═══ -->
+<aside>
+  <div class="sb-brand"><h2>Bibliometric Engine</h2><p>Figure Generator · Q1 Level</p></div>
+  <nav>
+    <div class="nl">Data</div>
+    <div class="ni active" onclick="sp('ingest',this)" id="nav-ingest"><span class="mi">upload_file</span> Data Ingestion</div>
+    <div class="nl">Figures</div>
+    <div class="ni dis" onclick="sp('fig0',this)" id="nav-fig0"><span class="mi">show_chart</span> Fig 0 · Production</div>
+    <div class="ni dis" onclick="sp('fig1',this)" id="nav-fig1"><span class="mi">person</span> Fig 1 · Authors</div>
+    <div class="ni dis" onclick="sp('fig2',this)" id="nav-fig2"><span class="mi">timeline</span> Fig 2 · Production/Time</div>
+    <div class="ni dis" onclick="sp('fig3',this)" id="nav-fig3"><span class="mi">account_balance</span> Fig 3 · Institutions</div>
+    <div class="ni dis" onclick="sp('fig4',this)" id="nav-fig4"><span class="mi">auto_stories</span> Fig 4 · Journals</div>
+    <div class="ni dis" onclick="sp('fig5',this)" id="nav-fig5"><span class="mi">public</span> Fig 5 · World Map</div>
+    <div class="ni dis" onclick="sp('fig6',this)" id="nav-fig6"><span class="mi">menu_book</span> Fig 6 · Cited Docs</div>
+    <div class="nl">Tools</div>
+    <div class="ni" onclick="sp('prisma',this)" id="nav-prisma"><span class="mi">account_tree</span> PRISMA Diagram</div>
+    <div class="nl">Settings</div>
+    <div class="ni dis" onclick="sp('settings',this)" id="nav-settings"><span class="mi">tune</span> Thresholds &amp; Export</div>
+  </nav>
+</aside>
+
+<!-- ═══ MAIN ═══ -->
+<main>
+  <header>
+    <div style="display:flex;align-items:center;gap:.7rem">
+      <span class="htl">Bibliometric Figure Generator</span>
+      <span class="hbg">Q1 Level</span>
+    </div>
+    <button class="bs" id="btn-gen" disabled onclick="genAll()"><span class="mi" style="font-size:15px">auto_graph</span> Generate Figures</button>
+  </header>
+
+  <!-- ══ INGEST ══ -->
+  <div id="page-ingest" class="pg active">
+
+    <!-- ── v17: single pre-merged Bibliometrix file (kept as-is) ── -->
+    <div class="ph"><div class="bc">Data / <span>Ingestion</span></div><h1 class="pt">Load Bibliometric Dataset</h1><p class="ps">Supports .xlsx, .csv and .bib exported from Bibliometrix (Scopus / Web of Science)</p></div>
+    <div class="dz" id="dzEl"><input type="file" id="fi" accept=".xlsx,.xls,.csv,.bib" onchange="hf(this.files)"/>
+      <span class="mi dzi">cloud_upload</span><h3>Drag files here or click to select</h3><p>Accepted formats: Bibliometrix (.xlsx), CSV and BibTeX (.bib)</p>
+      <div class="dzf"><span class="dzft">.xlsx</span><span class="dzft">.csv</span><span class="dzft">.bib</span></div></div>
+    <div id="flst" class="fl"></div>
+
+    <div class="sd" style="margin:1.8rem 0 1.4rem"></div>
+
+    <!-- ── Stage 1: multi-database ingestion & deduplication (from BiblioStream v8) ── -->
+    <div class="ph"><div class="bc">Data / <span>Stage 1 · Ingestion &amp; Deduplication</span></div><h1 class="pt">Stage 1: Ingestion &amp; Deduplication</h1><p class="ps">Upload raw exports from Web of Science, Scopus, Dimensions, OpenAlex, Lens.org, PubMed or the Cochrane Library. Records are parsed into the 59-column Bibliometrix schema, optionally restricted by publication year, deduplicated across databases and then passed to the figure engine.</p></div>
+
+    <!-- Upload grid -->
+    <div class="thc upg" style="margin-bottom:1.1rem">
+      <div class="cp" style="margin-bottom:0">
+        <div class="dbh"><div class="dbi"><span class="mi">database</span></div><div style="flex:1"><h4 style="margin-bottom:0">Scopus</h4><p class="dbsub">.csv · .bib · .ris — multiple files allowed</p></div><span id="scopus-badge" class="fbadge" style="display:none">0 files</span></div>
+        <div class="dz dz-sm" id="scopus-drop" ondragover="handleDragOver(event,'scopus-drop')" ondragleave="handleDragLeave(event,'scopus-drop')" ondrop="handleDrop(event,'scopus')">
+          <input type="file" id="scopus-file-input" accept=".csv,.tsv,.txt,.bib,.ris,.xlsx,.xls,.json,.nbib" multiple onchange="handleFileSelect(event,'scopus')"/>
+          <span class="mi dzi">cloud_upload</span><h3>Scopus export</h3><p class="dz-hint">Drop files here or click to choose</p>
+          <div class="dzf"><span class="dzft">.csv</span><span class="dzft">.bib</span><span class="dzft">.ris</span><span class="dzft">.xlsx</span></div>
+        </div>
+        <div id="scopus-file-list" class="fl"></div>
+      </div>
+      <div class="cp" style="margin-bottom:0">
+        <div class="dbh"><div class="dbi"><span class="mi">science</span></div><div style="flex:1"><h4 style="margin-bottom:0">Web of Science</h4><p class="dbsub">.txt (plaintext / tab-delimited) · .xls · .bib · .ris</p></div><span id="wos-badge" class="fbadge" style="display:none">0 files</span></div>
+        <div class="dz dz-sm" id="wos-drop" ondragover="handleDragOver(event,'wos-drop')" ondragleave="handleDragLeave(event,'wos-drop')" ondrop="handleDrop(event,'wos')">
+          <input type="file" id="wos-file-input" accept=".csv,.tsv,.txt,.bib,.ris,.xlsx,.xls,.json,.nbib" multiple onchange="handleFileSelect(event,'wos')"/>
+          <span class="mi dzi">cloud_upload</span><h3>Web of Science export</h3><p class="dz-hint">Drop files here or click to choose</p>
+          <div class="dzf"><span class="dzft">.txt</span><span class="dzft">.xls</span><span class="dzft">.bib</span><span class="dzft">.ris</span><span class="dzft">.csv</span></div>
+        </div>
+        <div id="wos-file-list" class="fl"></div>
+      </div>
+      <div class="cp" style="margin-bottom:0">
+        <div class="dbh"><div class="dbi"><span class="mi">hub</span></div><div style="flex:1"><h4 style="margin-bottom:0">Other databases</h4><p class="dbsub">Dimensions · OpenAlex · Lens.org · PubMed · Cochrane — auto-detected</p></div><span id="other-badge" class="fbadge" style="display:none">0 files</span></div>
+        <div class="dz dz-sm" id="other-drop" ondragover="handleDragOver(event,'other-drop')" ondragleave="handleDragLeave(event,'other-drop')" ondrop="handleDrop(event,'other')">
+          <input type="file" id="other-file-input" accept=".csv,.tsv,.txt,.bib,.ris,.xlsx,.xls,.json,.nbib" multiple onchange="handleFileSelect(event,'other')"/>
+          <span class="mi dzi">cloud_upload</span><h3>Other databases export</h3><p class="dz-hint">Drop files here or click to choose</p>
+          <div class="dzf"><span class="dzft">.csv</span><span class="dzft">.xlsx</span><span class="dzft">.json</span><span class="dzft">.txt</span><span class="dzft">.nbib</span><span class="dzft">.bib</span><span class="dzft">.ris</span></div>
+        </div>
+        <div id="other-file-list" class="fl"></div>
+      </div>
+    </div>
+
+    <details class="cp" style="padding:.75rem 1.35rem">
+      <summary style="margin-top:0"><span class="mi" style="font-size:15px">info</span> Supported databases &amp; formats (Bibliometrix-compatible)</summary>
+      <div style="overflow-x:auto;margin-top:.7rem"><table class="pvt fmt"><thead><tr><th>Database</th><th>Formats read by Stage 1</th><th>How to export</th></tr></thead><tbody>
+        <tr><td><b>Web of Science</b> (WoS / WoK)</td><td>Plain text (.txt), tab-delimited (.txt), Excel (.xls/.xlsx), BibTeX (.bib), RIS</td><td>Export → "Plain text file" / "Tab delimited" / "Excel" / "BibTeX", <i>Full Record and Cited References</i></td></tr>
+        <tr><td><b>Scopus</b></td><td>CSV, BibTeX (.bib), RIS</td><td>Export → CSV / BibTeX, all fields</td></tr>
+        <tr><td><b>Dimensions</b></td><td>CSV, Excel (.xlsx), BibTeX</td><td>Export → "Export results for bibliometric mapping" (CSV/XLSX) or "Export to BibTeX"</td></tr>
+        <tr><td><b>OpenAlex</b></td><td>Website CSV export, API JSON (works list or <code>{results:[…]}</code>)</td><td>openalex.org → Export CSV, or <code>api.openalex.org/works?…</code> saved as .json</td></tr>
+        <tr><td><b>OpenAlex API</b> (via openalexR)</td><td>CSV / XLSX written from R (<code>oa_fetch()</code> data frame or <code>bibliometrix::convert2df(…, dbsource="openalex_api")</code>)</td><td><code>write.csv(df, "openalex.csv")</code> / <code>openxlsx::write.xlsx()</code></td></tr>
+        <tr><td><b>Lens.org</b></td><td>CSV (Scholarly Works export), RIS, BibTeX</td><td>Export → CSV, all fields</td></tr>
+        <tr><td><b>PubMed</b></td><td>PubMed / MEDLINE tagged (.txt, .nbib), CSV</td><td>Save → "PubMed" or "MEDLINE" format (.nbib / .txt), or CSV</td></tr>
+        <tr><td><b>Cochrane Library</b></td><td>Plain text (.txt), RIS</td><td>Export selected citations → "Plain text" / "RIS"</td></tr>
+        <tr><td><b>Bibliometrix</b></td><td>.xlsx / .csv already in the 59-column schema</td><td>Also accepted by the single-file loader above</td></tr>
+      </tbody></table></div>
+      <p class="hint">Text files are identified by their content, not their extension; tabular files by their column names. Author names from every source are normalised to the Bibliometrix convention <code>SURNAME IN</code> so that authors match across databases.</p>
+    </details>
+
+    <!-- Year filter (PY) -->
+    <div class="cp">
+      <h4><span class="mi" style="font-size:17px">date_range</span> Year Filter (PY field)<span class="h4sub">restricts the corpus by publication year before deduplication</span><label class="chk" style="margin-left:auto"><input type="checkbox" id="py-filter-enable"/> Apply filter</label></h4>
+      <div class="cg" style="align-items:end">
+        <div><label>Start year</label><input type="number" id="py-min" class="tin" placeholder="2000" min="1900" max="2100" step="1"/></div>
+        <div><label>End year</label><input type="number" id="py-max" class="tin" placeholder="2025" min="1900" max="2100" step="1"/></div>
+        <label class="chk boxed"><input type="checkbox" id="py-include-missing" checked/><span><b>Keep records without PY</b><br/><small>records with no declared year</small></span></label>
+        <div><button type="button" class="bs" id="btn-py-auto" onclick="autoDetectYearRange()" style="width:100%;justify-content:center"><span class="mi" style="font-size:15px">auto_fix_high</span> Auto-detect range</button></div>
+      </div>
+      <p id="py-filter-hint" class="hint" style="display:none"></p>
+    </div>
+
+    <!-- Deduplication strategy -->
+    <div class="cp">
+      <h4><span class="mi" style="font-size:17px">join_inner</span> Deduplication Strategy<span class="h4sub">priority Scopus → WoS → other sources when a pair is merged</span></h4>
+      <div class="thc">
+        <label class="chk boxed"><input type="checkbox" id="dedup-doi" checked/><span><b>DOI matching</b><br/><small>Exact comparison of normalised DOIs (both records must have one)</small></span></label>
+        <label class="chk boxed"><input type="checkbox" id="dedup-title" checked/><span><b>Title similarity</b><br/><small>Jaro-Winkler ≥ 92% on the normalised title + same publication year</small></span></label>
+        <label class="chk boxed"><input type="checkbox" id="dedup-authyear" checked/><span><b>Authors + Year</b><br/><small>First-author surname + PY fingerprint + title ≥ 80%</small></span></label>
+      </div>
+    </div>
+
+    <!-- Process button -->
+    <div style="display:flex;justify-content:flex-end;margin-bottom:1.1rem">
+      <button class="bp" id="btn-ingest" disabled onclick="runIngestion()"><span class="mi" style="font-size:16px">play_arrow</span> Process Files</button>
+    </div>
+
+    <!-- Progress panel -->
+    <div id="ingestion-progress" class="cp" style="display:none">
+      <h4><span id="ingestion-spinner" class="spin"></span> Processing files…</h4>
+      <div class="pstep" id="prog-read"><div class="psh"><span>Reading files</span><span id="prog-read-pct">0%</span></div><div class="pb" style="margin-top:.3rem"><div class="pf" id="prog-read-bar" style="width:0%"></div></div></div>
+      <div class="pstep" id="prog-meta" style="opacity:.4"><div class="psh"><span>Processing metadata</span><span id="prog-meta-pct">0%</span></div><div class="pb" style="margin-top:.3rem"><div class="pf" id="prog-meta-bar" style="width:0%"></div></div></div>
+      <div class="pstep" id="prog-dedup" style="opacity:.4"><div class="psh"><span>Detecting duplicates</span><span id="prog-dedup-pct">0%</span></div><div class="pb" style="margin-top:.3rem"><div class="pf" id="prog-dedup-bar" style="width:0%"></div></div></div>
+      <div class="pstep" id="prog-merge" style="opacity:.4"><div class="psh"><span>Merging datasets</span><span id="prog-merge-pct">0%</span></div><div class="pb" style="margin-top:.3rem"><div class="pf" id="prog-merge-bar" style="width:0%"></div></div></div>
+      <p id="ingestion-status-msg" class="hint" style="color:var(--sec);margin-top:.7rem;font-weight:600">Reading files…</p>
+    </div>
+
+    <!-- Results panel -->
+    <div id="ingestion-results" style="display:none">
+      <div class="sg" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
+        <div class="sc"><div class="lb">Scopus records</div><div class="vl" id="res-scopus-count">0</div><div class="sb">after year filter</div></div>
+        <div class="sc"><div class="lb">WoS records</div><div class="vl" id="res-wos-count">0</div><div class="sb">after year filter</div></div>
+        <div class="sc"><div class="lb">Other sources</div><div class="vl" id="res-other-count">0</div><div class="sb" id="res-other-sub">Dimensions · OpenAlex · Lens · PubMed · Cochrane</div></div>
+        <div class="sc"><div class="lb">Filtered by year</div><div class="vl" id="res-yearfilter-count" style="color:#b26a00">0</div><div class="sb">outside PY range</div></div>
+        <div class="sc"><div class="lb">Duplicates removed</div><div class="vl" id="res-dup-count" style="color:#c62828">0</div><div class="sb">cross-database matches</div></div>
+        <div class="sc"><div class="lb">Final dataset</div><div class="vl" id="res-final-count" style="color:#2e7d32">0</div><div class="sb">unique records</div></div>
+      </div>
+      <div class="cp">
+        <div class="fch">
+          <div><div class="fct">Dataset Preview</div><div class="fcs" id="preview-count-label"></div></div>
+          <div class="er">
+            <button class="eb grp" onclick="downloadIngestionXLSX()" title="Merged, deduplicated dataset — 59 Bibliometrix columns"><span class="mi" style="font-size:13px">download</span> Download XLSX</button>
+            <button class="eb" onclick="downloadSourceTaggedXLSX()" title="All original fields + DB_Origin column (e.g. Scopus / WOS / Scopus/WOS / Dimensions)"><span class="mi" style="font-size:13px">database</span> XLSX + DB Origin</button>
+            <button class="eb" onclick="downloadAuditXLSX()" title="Every removed duplicate with the reason it was flagged"><span class="mi" style="font-size:13px">bug_report</span> Duplicates Audit Log</button>
+          </div>
+        </div>
+        <div style="overflow-x:auto;border-radius:.45rem;border:1px solid var(--ol)">
+          <table class="pvt">
+            <thead><tr><th>#</th><th>Title</th><th>First author</th><th>Year</th><th>Source</th><th>DB origin</th><th>DOI</th></tr></thead>
+            <tbody id="preview-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Figure-engine processing status (shared by both loaders) -->
+    <div id="pst" style="display:none;margin-top:.9rem"><div class="pb"><div class="pf" id="pfill" style="width:0%"></div></div><p style="font-size:.72rem;color:var(--onsv);margin-top:.35rem" id="pmsg">Processing...</p></div>
+
+    <div id="dsum" style="display:none;margin-top:1.35rem">
+      <h3 style="font-family:'Manrope',sans-serif;font-size:.95rem;font-weight:700;color:var(--pr);margin-bottom:.7rem">Dataset Summary</h3>
+      <div class="sg" id="scards"></div>
+      <div class="cp" style="margin-top:0">
+        <h4><span class="mi" style="font-size:17px">tune</span> Global Settings</h4>
+        <div class="cg">
+          <div><label>Top N — Authors <span class="cv" id="v-au">20</span></label><input type="range" min="5" max="50" value="20" id="s-au" oninput="usl('au')"/></div>
+          <div><label>Top N — Institutions <span class="cv" id="v-in">20</span></label><input type="range" min="5" max="50" value="20" id="s-in" oninput="usl('in')"/></div>
+          <div><label>Top N — Journals <span class="cv" id="v-jo">20</span></label><input type="range" min="5" max="50" value="20" id="s-jo" oninput="usl('jo')"/></div>
+          <div><label>Top N — Cited Docs <span class="cv" id="v-dc">20</span></label><input type="range" min="5" max="50" value="20" id="s-dc" oninput="usl('dc')"/></div>
+          <div><label>Font Size <span class="cv" id="v-fs">14</span> px</label><input type="range" min="10" max="22" value="14" id="s-fs" oninput="ufs()"/></div>
+          <div><label>Export Resolution</label>
+            <select id="s-dpi"><option value="1">96 dpi (screen)</option><option value="2">150 dpi</option><option value="3" selected>300 dpi (publication)</option><option value="4">450 dpi</option><option value="5">600 dpi</option><option value="6">1200 dpi</option></select></div>
+          <div><label>Color Palette</label>
+            <select id="s-pal" onchange="uppal()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+          <div><label>Export Format</label>
+            <select id="s-fmt"><option value="png">PNG</option><option value="jpeg">JPEG</option></select></div>
+        </div>
+        <div style="margin-top:.9rem"><button class="bp" id="btn-gen2" disabled onclick="genAll()"><span class="mi" style="font-size:16px">auto_graph</span> Generate All Figures</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ FIG 0 — ANNUAL PRODUCTION ══ -->
+  <div id="page-fig0" class="pg">
+    <div class="ph"><div class="bc">Figures / <span>Annual Production</span></div><h1 class="pt">Fig 0 · Annual Scientific Production</h1><p class="ps">Annual publications + cumulative trajectory with decade distribution boxplots</p></div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">tune</span> Settings — Fig 0</h4>
+      <div class="cg">
+        <div><label>Font Size <span class="cv" id="f0-fs-v">14</span> px</label><input type="range" min="8" max="22" value="14" id="f0-fs" oninput="document.getElementById('f0-fs-v').textContent=this.value;rF0()"/></div>
+        <div><label>Panel A — Width (px) <span class="cv" id="f0-wa-v">900</span></label><input type="range" min="400" max="1800" value="900" step="50" id="f0-wa" oninput="document.getElementById('f0-wa-v').textContent=this.value;rSz('f0-aw',this.value)"/></div>
+        <div><label>Panel A — Height (px) <span class="cv" id="f0-ha-v">260</span></label><input type="range" min="150" max="800" value="260" step="10" id="f0-ha" oninput="document.getElementById('f0-ha-v').textContent=this.value;document.getElementById('f0-aw').style.height=this.value+'px'"/></div>
+        <div><label>Panel A — Color Palette</label>
+          <select id="f0-pa-pal" onchange="APP.settings.palF0A=this.value;if(APP.data)rF0()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+        <div><label>Panel B — Width (px) <span class="cv" id="f0-wb-v">900</span></label><input type="range" min="400" max="1800" value="900" step="50" id="f0-wb" oninput="document.getElementById('f0-wb-v').textContent=this.value;rSz('f0-bw',this.value);rF0B()"/></div>
+        <div><label>Panel B — Height (px) <span class="cv" id="f0-hb-v">280</span></label><input type="range" min="150" max="800" value="280" step="10" id="f0-hb" oninput="document.getElementById('f0-hb-v').textContent=this.value;document.getElementById('f0-bw').style.height=this.value+'px';rF0B()"/></div>
+        <div><label>Panel B — Color Palette</label>
+          <select id="f0-pb-pal" onchange="APP.settings.palF0B=this.value;if(APP.data)rF0B()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+      </div>
+    </div>
+    <div class="fc">
+      <div class="fch"><div><div class="fct">Annual Scientific Production</div><div class="fcs">Annual count (black) + cumulative publications (red) · Panel A</div></div>
+        <div class="er"><button class="eb" onclick="xc('f0-a','Fig0A_AnnualProduction')"><span class="mi" style="font-size:13px">download</span>PNG A</button><button class="eb" onclick="xSVGChart('f0-a','Fig0A_AnnualProduction')"><span class="mi" style="font-size:13px">download</span>SVG A</button><button class="eb" onclick="xBoxplotPNG('Fig0B_DecadeBoxplot')"><span class="mi" style="font-size:13px">download</span>PNG B</button><button class="eb" onclick="xBoxplotSVG('Fig0B_DecadeBoxplot')"><span class="mi" style="font-size:13px">download</span>SVG B</button><button class="eb grp" onclick="xMergeBoxplotV('Fig0_AnnualProduction_Combined')"><span class="mi" style="font-size:13px">merge</span>Combined PNG</button><button class="eb grp" onclick="xMergeBoxplotVSVG('Fig0_AnnualProduction_Combined')"><span class="mi" style="font-size:13px">merge</span>Combined SVG</button></div></div>
+      <div class="clb">Panel A — Annual + Cumulative</div>
+      <div id="f0-aw" style="position:relative;height:260px"><canvas id="f0-a" aria-label="Annual and cumulative publications">Annual publications chart.</canvas></div>
+      <div style="height:.6rem"></div>
+      <div class="clb">Panel B — Decade Distribution (Boxplot)</div>
+      <div id="f0-bw" style="position:relative;height:280px;overflow:hidden"><svg id="f0-b-svg" style="width:100%;height:100%" aria-label="Decade boxplot">Decade boxplot.</svg></div>
+      <div style="display:flex;gap:1.5rem;margin-top:.6rem;flex-wrap:wrap">
+        <div class="lgr"><div style="width:12px;height:3px;background:#333;margin-right:2px;border-radius:1px"></div><div style="width:6px;height:6px;background:#333;border-radius:50%;margin-right:4px"></div><span>Annual publications (left axis)</span></div>
+        <div class="lgr"><div style="width:16px;height:3px;background:#c0392b;margin-right:4px"></div><span>Cumulative publications (right axis)</span></div>
+      </div>
+      <details><summary><span class="mi" style="font-size:14px">info</span> Scientific Description</summary>
+        <div class="dp"><strong>Objective:</strong> Visualize the temporal evolution of scientific production, identifying acceleration phases and growth patterns by decade.<br><br><strong>Panel A:</strong> X-axis = year; Left Y-axis = annual count; Right Y-axis = cumulative total. Black line with markers = annual publications. Red line = cumulative growth curve, revealing exponential acceleration in recent decades.<br><br><strong>Panel B:</strong> Boxplot distribution of annual publications per decade. Box = interquartile range (Q1–Q3); horizontal line = median; whiskers = min/max. Distinct colors per decade facilitate visual comparison of publication rate distributions.<br><br><strong>Interpretation:</strong> Accelerating annual counts and cumulative curves approaching inflection points indicate a consolidating field. Increasing IQR range in recent decades signals growing research heterogeneity.</div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ══ FIG 1 — AUTHORS ══ -->
+  <div id="page-fig1" class="pg">
+    <div class="ph"><div class="bc">Figures / <span>Authors Productivity</span></div><h1 class="pt">Fig 1 · Authors Productivity</h1><p class="ps">Raw articles (left) vs. fractionalized contribution (right)</p></div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">tune</span> Settings — Fig 1</h4>
+      <div class="cg">
+        <div><label>Top N — Authors <span class="cv" id="f1-v">20</span></label><input type="range" min="5" max="50" value="20" id="f1-s" oninput="syncS('au','f1-s','f1-v');rF1()"/></div>
+        <div><label>Font Size <span class="cv" id="f1-fs-v">14</span> px</label><input type="range" min="8" max="22" value="14" id="f1-fs" oninput="document.getElementById('f1-fs-v').textContent=this.value;rF1()"/></div>
+        <div><label>Panel A — Width (px) <span class="cv" id="f1-wa-v">600</span></label><input type="range" min="300" max="1200" value="600" step="50" id="f1-wa" oninput="document.getElementById('f1-wa-v').textContent=this.value;rSz('f1-lw',this.value)"/></div>
+        <div><label>Panel B — Width (px) <span class="cv" id="f1-wb-v">600</span></label><input type="range" min="300" max="1200" value="600" step="50" id="f1-wb" oninput="document.getElementById('f1-wb-v').textContent=this.value;rSz('f1-rw',this.value)"/></div>
+        <div><label>Panel A — Height (px) <span class="cv" id="f1-ha-v">auto</span></label><input type="range" min="200" max="1400" value="560" step="20" id="f1-ha" oninput="document.getElementById('f1-ha-v').textContent=this.value+'px';document.getElementById('f1-lw').style.height=this.value+'px'"/></div>
+        <div><label>Panel B — Height (px) <span class="cv" id="f1-hb-v">auto</span></label><input type="range" min="200" max="1400" value="560" step="20" id="f1-hb" oninput="document.getElementById('f1-hb-v').textContent=this.value+'px';document.getElementById('f1-rw').style.height=this.value+'px'"/></div>
+        <div><label>Panel A — Color Palette</label>
+          <select id="f1-pa-pal" onchange="APP.settings.palF1A=this.value;if(APP.data)rF1()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+        <div><label>Panel B — Color Palette</label>
+          <select id="f1-pb-pal" onchange="APP.settings.palF1B=this.value;if(APP.data)rF1()"><option value="blue">Blue</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm" selected>Warm (orange)</option></select></div>
+      </div>
+    </div>
+    <div class="fc">
+      <div class="fch"><div><div class="fct">Most Relevant Authors</div><div class="fcs">Articles count (left) · Articles fractionalized (right)</div></div>
+        <div class="er">
+          <button class="eb" onclick="xc('f1-l','Fig1_Authors_Raw')"><span class="mi" style="font-size:13px">download</span>PNG Left</button>
+          <button class="eb" onclick="xSVGChart('f1-l','Fig1_Authors_Raw')"><span class="mi" style="font-size:13px">download</span>SVG Left</button>
+          <button class="eb" onclick="xc('f1-r','Fig1_Authors_Frac')"><span class="mi" style="font-size:13px">download</span>PNG Right</button>
+          <button class="eb" onclick="xSVGChart('f1-r','Fig1_Authors_Frac')"><span class="mi" style="font-size:13px">download</span>SVG Right</button>
+          <button class="eb grp" onclick="xMerge(['f1-l','f1-r'],'Fig1_Authors_Combined')"><span class="mi" style="font-size:13px">merge</span>Combined PNG</button>
+          <button class="eb grp" onclick="xMergeSVG(['f1-l','f1-r'],'Fig1_Authors_Combined')"><span class="mi" style="font-size:13px">merge</span>Combined SVG</button>
+        </div></div>
+      <div class="tc">
+        <div><div class="clb">Articles</div><div style="position:relative" id="f1-lw"><canvas id="f1-l" aria-label="Raw article count per author">Raw articles per author.</canvas></div></div>
+        <div><div class="clb">Articles Fractionalized</div><div style="position:relative" id="f1-rw"><canvas id="f1-r" aria-label="Fractionalized articles per author">Fractionalized.</canvas></div></div>
+      </div>
+      <div class="tc" style="margin-top:.55rem">
+        <div class="lgr"><div class="lgb" id="lg1l" style="background:linear-gradient(to right,#c6dbef,#084594)"></div><span>Color scale: N. Articles (low → high)</span></div>
+        <div class="lgr"><div class="lgb" id="lg1r" style="background:linear-gradient(to right,#ffe0b2,#bf360c)"></div><span>Color scale: Articles Fractionalized (low → high)</span></div>
+      </div>
+      <details><summary><span class="mi" style="font-size:14px">info</span> Scientific Description</summary>
+        <div class="dp"><strong>Objective:</strong> Identify the most prolific authors and assess their adjusted scholarly contribution via fractionalization.<br><br><strong>Left panel — Articles:</strong> X-axis = number of publications; Y-axis = authors sorted descending. Bubble size and blue color gradient encode raw article count.<br><br><strong>Right panel — Articles Fractionalized:</strong> Each article's contribution is divided by its total author count. Orange-to-dark-brown gradient. Authors with high fractionalized scores relative to raw count publish predominantly as first or sole authors.<br><br><strong>Interpretation:</strong> Discrepancies between panels reveal collaboration patterns. High raw count / low fractionalized = large team co-authorship. The reverse identifies scholars with concentrated independent output.</div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ══ FIG 2 — AUTHORS OVER TIME ══ -->
+  <div id="page-fig2" class="pg">
+    <div class="ph"><div class="bc">Figures / <span>Authors' Production over Time</span></div><h1 class="pt">Fig 2 · Authors' Production over Time</h1><p class="ps">Horizontal timeline · bubble size = N. Articles/year · color = TC per Year</p></div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">tune</span> Settings — Fig 2</h4>
+      <div class="cg">
+        <div><label>Top N — Authors <span class="cv" id="f2-v">20</span></label><input type="range" min="5" max="40" value="20" id="f2-s" oninput="syncS('au','f2-s','f2-v');rF2()"/></div>
+        <div><label>Font Size <span class="cv" id="f2-fs-v">14</span> px</label><input type="range" min="8" max="22" value="14" id="f2-fs" oninput="document.getElementById('f2-fs-v').textContent=this.value;rF2()"/></div>
+        <div><label>Width (px) <span class="cv" id="f2-w-v">auto</span></label><input type="range" min="500" max="1800" value="900" step="50" id="f2-ww" oninput="document.getElementById('f2-w-v').textContent=this.value+'px';rSz('f2-w',this.value)"/></div>
+        <div><label>Height (px) <span class="cv" id="f2-h-v">auto</span></label><input type="range" min="300" max="1800" value="760" step="20" id="f2-hh" oninput="document.getElementById('f2-h-v').textContent=this.value+'px';document.getElementById('f2-w').style.height=this.value+'px'"/></div>
+        <div><label>Color Palette — TC</label>
+          <select id="f2-pal" onchange="rF2()">
+            <option value="red">Red (default)</option>
+            <option value="blue">Blue</option>
+            <option value="green">Green</option>
+            <option value="purple">Purple</option>
+            <option value="teal">Teal</option>
+          </select></div>
+        <div>
+          <label>Year Start <span class="cv" id="f2-yr-min-v">—</span></label>
+          <input type="range" id="f2-yr-min" min="1900" max="2030" value="1990" step="1"
+            oninput="document.getElementById('f2-yr-min-v').textContent=this.value;clampYrMax();rF2()"/>
+        </div>
+        <div>
+          <label>Year End <span class="cv" id="f2-yr-max-v">—</span></label>
+          <input type="range" id="f2-yr-max" min="1900" max="2030" value="2025" step="1"
+            oninput="document.getElementById('f2-yr-max-v').textContent=this.value;clampYrMin();rF2()"/>
+        </div>
+      </div>
+    </div>
+    <div class="fc">
+      <div class="fch"><div><div class="fct">Authors' Production over Time</div><div class="fcs">Bubble size = N. Articles/year · Color = TC per Year</div></div>
+        <div class="er"><button class="eb" onclick="xc('f2-c','Fig2_ProductionOverTime')"><span class="mi" style="font-size:13px">download</span>PNG</button><button class="eb" onclick="xSVGChart('f2-c','Fig2_ProductionOverTime')"><span class="mi" style="font-size:13px">download</span>SVG</button></div></div>
+      <div style="overflow-x:auto"><div style="position:relative;min-width:580px" id="f2-w"><canvas id="f2-c" aria-label="Authors production timeline">Author timeline.</canvas></div></div>
+      <div style="display:flex;gap:1.8rem;margin-top:.6rem;flex-wrap:wrap" id="f2-legend">
+        <div class="lgr"><div style="display:flex;gap:3px;align-items:center"><div style="width:6px;height:6px;border-radius:50%;background:#aaa"></div><div style="width:10px;height:10px;border-radius:50%;background:#777"></div><div style="width:15px;height:15px;border-radius:50%;background:#333"></div></div><span style="margin-left:4px" id="f2-lg-size">Bubble size: N. Articles per Year</span></div>
+        <div class="lgr" id="f2-lg-col-wrap"><div class="lgb" id="f2-lg-col-bar" style="background:linear-gradient(to right,#fcbba1,#cb181d)"></div><span id="f2-lg-col-lbl">Color: TC per Year</span></div>
+      </div>
+      <details><summary><span class="mi" style="font-size:14px">info</span> Scientific Description</summary>
+        <div class="dp"><strong>Objective:</strong> Map the temporal scholarly activity of the most productive authors, identifying career trajectories and citation efficiency over time.<br><br><strong>Axes:</strong> X-axis = publication year; Y-axis = author name.<br><br><strong>Visual encoding:</strong> Bubble size ∝ number of articles published that year. Color encodes citations per year (TC/yr): cool pinks = low citation rate; warm reds = high rate. A connecting line traces each author's timeline from first to last publication.<br><br><strong>Interpretation:</strong> Authors with long timelines demonstrate sustained research commitment. Large, intensely colored bubbles mark high-impact publication events.</div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ══ FIG 3 — INSTITUTIONS ══ -->
+  <div id="page-fig3" class="pg">
+    <div class="ph"><div class="bc">Figures / <span>Institutions Productivity</span></div><h1 class="pt">Fig 3 · Institutions Productivity</h1><p class="ps">Ranked institutional output — top affiliations</p></div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">tune</span> Settings — Fig 3</h4>
+      <div class="cg">
+        <div><label>Top N — Institutions <span class="cv" id="f3-v">20</span></label><input type="range" min="5" max="50" value="20" id="f3-s" oninput="syncS('in','f3-s','f3-v');rF3()"/></div>
+        <div><label>Font Size <span class="cv" id="f3-fs-v">14</span> px</label><input type="range" min="8" max="22" value="14" id="f3-fs" oninput="document.getElementById('f3-fs-v').textContent=this.value;rF3()"/></div>
+        <div><label>Width (px) <span class="cv" id="f3-w-v">auto</span></label><input type="range" min="400" max="1800" value="800" step="50" id="f3-ww" oninput="document.getElementById('f3-w-v').textContent=this.value+'px';rSz('f3-w',this.value)"/></div>
+        <div><label>Row Height (px/item) <span class="cv" id="f3-rh-v">30</span></label><input type="range" min="18" max="60" value="30" step="2" id="f3-rh" oninput="document.getElementById('f3-rh-v').textContent=this.value;rF3()"/></div>
+        <div><label>Color Palette</label>
+          <select id="f3-pal" onchange="APP.settings.palF3=this.value;if(APP.data)rF3()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+      </div>
+    </div>
+    <div class="fc">
+      <div class="fch"><div><div class="fct">Most Relevant Affiliations</div><div class="fcs">Articles per institution, sorted descending</div></div>
+        <div class="er"><button class="eb" onclick="xc('f3-c','Fig3_Institutions')"><span class="mi" style="font-size:13px">download</span>PNG</button><button class="eb" onclick="xSVGChart('f3-c','Fig3_Institutions')"><span class="mi" style="font-size:13px">download</span>SVG</button></div></div>
+      <div style="position:relative" id="f3-w"><canvas id="f3-c" aria-label="Institutions by article count">Institutions chart.</canvas></div>
+      <div class="lgr"><div class="lgb" id="lg3" style="background:linear-gradient(to right,#c6dbef,#084594)"></div><span>Color scale: N. Articles (low → high)</span></div>
+      <details><summary><span class="mi" style="font-size:14px">info</span> Scientific Description</summary>
+        <div class="dp"><strong>Objective:</strong> Identify leading research institutions and quantify their bibliometric output.<br><br><strong>Axes:</strong> X-axis = number of articles; Y-axis = institution names sorted descending by productivity.<br><br><strong>Visual encoding:</strong> Bar length and blue color intensity both encode article count. Dual encoding reinforces the ranking hierarchy.<br><br><strong>Interpretation:</strong> Dominant institutions reflect geographic and thematic concentration of the research field.</div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ══ FIG 4 — JOURNALS ══ -->
+  <div id="page-fig4" class="pg">
+    <div class="ph"><div class="bc">Figures / <span>Journal Productivity</span></div><h1 class="pt">Fig 4 · Journal / Source Productivity</h1><p class="ps">Most productive journals ranked by article contribution</p></div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">tune</span> Settings — Fig 4</h4>
+      <div class="cg">
+        <div><label>Top N — Journals <span class="cv" id="f4-v">20</span></label><input type="range" min="5" max="50" value="20" id="f4-s" oninput="syncS('jo','f4-s','f4-v');rF4()"/></div>
+        <div><label>Font Size <span class="cv" id="f4-fs-v">14</span> px</label><input type="range" min="8" max="22" value="14" id="f4-fs" oninput="document.getElementById('f4-fs-v').textContent=this.value;rF4()"/></div>
+        <div><label>Width (px) <span class="cv" id="f4-w-v">auto</span></label><input type="range" min="400" max="1800" value="800" step="50" id="f4-ww" oninput="document.getElementById('f4-w-v').textContent=this.value+'px';rSz('f4-w',this.value)"/></div>
+        <div><label>Row Height (px/item) <span class="cv" id="f4-rh-v">30</span></label><input type="range" min="18" max="60" value="30" step="2" id="f4-rh" oninput="document.getElementById('f4-rh-v').textContent=this.value;rF4()"/></div>
+        <div><label>Color Palette</label>
+          <select id="f4-pal" onchange="APP.settings.palF4=this.value;if(APP.data)rF4()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+      </div>
+    </div>
+    <div class="fc">
+      <div class="fch"><div><div class="fct">Most Relevant Sources</div><div class="fcs">Top journals by publication count</div></div>
+        <div class="er"><button class="eb" onclick="xc('f4-c','Fig4_Journals')"><span class="mi" style="font-size:13px">download</span>PNG</button><button class="eb" onclick="xSVGChart('f4-c','Fig4_Journals')"><span class="mi" style="font-size:13px">download</span>SVG</button></div></div>
+      <div style="position:relative" id="f4-w"><canvas id="f4-c" aria-label="Journals by article count">Journals chart.</canvas></div>
+      <div class="lgr"><div class="lgb" id="lg4" style="background:linear-gradient(to right,#c6dbef,#084594)"></div><span>Color scale: N. Articles (low → high)</span></div>
+      <details><summary><span class="mi" style="font-size:14px">info</span> Scientific Description</summary>
+        <div class="dp"><strong>Objective:</strong> Identify core journals (Bradford's core) driving dissemination in the research area.<br><br><strong>Axes:</strong> X-axis = number of articles; Y-axis = journal/source name, sorted descending.<br><br><strong>Interpretation:</strong> Concentration in specific journals confirms the methodological and thematic coherence of the field. High-impact journals at the top indicate Q1-level visibility.</div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ══ FIG 5 — WORLD MAP ══ -->
+  <div id="page-fig5" class="pg">
+    <div class="ph"><div class="bc">Figures / <span>Country Collaboration</span></div><h1 class="pt">Fig 5 · Country Collaboration Map</h1><p class="ps">Geographic distribution of publications and international co-authorship networks</p></div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">tune</span> Settings — Fig 5</h4>
+      <div class="cg">
+        <div><label>Min. Collaborations to Show Edge <span class="cv" id="f5-mc-v">2</span></label><input type="range" min="1" max="20" value="2" id="f5-mc" oninput="document.getElementById('f5-mc-v').textContent=this.value;APP.settings.mc=parseInt(this.value);rF5()"/></div>
+        <div><label>Font Size <span class="cv" id="f5-fs-v">14</span> px</label><input type="range" min="8" max="22" value="14" id="f5-fs" oninput="document.getElementById('f5-fs-v').textContent=this.value;APP.settings.fs=parseInt(this.value)"/></div>
+        <div><label>Map Width (px) <span class="cv" id="f5-w-v">auto</span></label><input type="range" min="500" max="1800" value="900" step="50" id="f5-ww" oninput="document.getElementById('f5-w-v').textContent=this.value+'px';document.getElementById('wmc').style.width=this.value+'px';rF5()"/></div>
+        <div><label>Color Palette</label>
+          <select id="f5-pal" onchange="APP.settings.palF5=this.value;if(APP.data)rF5()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+      </div>
+    </div>
+    <div class="fc">
+      <div class="fch"><div><div class="fct">Country Scientific Production Map</div><div class="fcs">Color = publication intensity · Lines = co-authorship collaborations</div></div>
+        <div class="er"><button class="eb" onclick="xSVG()"><span class="mi" style="font-size:13px">download</span>SVG</button><button class="eb" onclick="xMapPNG()"><span class="mi" style="font-size:13px">download</span>PNG</button></div></div>
+      <div id="wmc"></div>
+      <div id="map-debug" style="font-size:.68rem;color:var(--onsv);margin-top:.4rem;padding:.35rem .6rem;background:var(--sf-lo);border-radius:.3rem;display:none"></div>
+      <div style="display:flex;align-items:center;gap:1rem;margin-top:.65rem;flex-wrap:wrap">
+        <div class="lgr"><div class="lgb" id="lg5" style="background:linear-gradient(to right,#deebf7,#084594)"></div><span>Publication intensity (low → high)</span></div>
+        <div class="lgr"><div style="width:25px;height:2px;background:#c0392b;margin-right:4px"></div><span>Collaboration edge (thickness ∝ strength)</span></div>
+        <div class="lgr"><div style="width:10px;height:10px;border-radius:50%;border:1.5px solid #084594;margin-right:4px"></div><span>Node size ∝ publications</span></div>
+      </div>
+      <details><summary><span class="mi" style="font-size:14px">info</span> Scientific Description</summary>
+        <div class="dp"><strong>Objective:</strong> Visualize the geospatial distribution of scientific production and map international collaboration networks via co-authorship.<br><br><strong>Visual encoding:</strong> Country fill uses a sequential blue choropleth (light = low, dark = high publications). Collaboration edges connect co-authoring country centroids with transparency ∝ collaboration strength. The <em>Min. Collaborations</em> slider controls the minimum number of joint publications required to display an edge, reducing visual clutter.<br><br><strong>Interpretation:</strong> Dominant countries reflect institutional concentration. The collaboration network reveals bilateral and multilateral research partnerships.</div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ══ FIG 6 — CITED DOCS ══ -->
+  <div id="page-fig6" class="pg">
+    <div class="ph"><div class="bc">Figures / <span>Most Cited Documents</span></div><h1 class="pt">Fig 6 · Most Globally Cited Documents</h1><p class="ps">Three-panel citation analysis: total citations, TC per year, normalized TC</p></div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">tune</span> Settings — Fig 6</h4>
+      <div class="cg">
+        <div><label>Top N — Documents <span class="cv" id="f6-v">20</span></label><input type="range" min="5" max="50" value="20" id="f6-s" oninput="syncS('dc','f6-s','f6-v');rF6()"/></div>
+        <div><label>Font Size <span class="cv" id="f6-fs-v">14</span> px</label><input type="range" min="8" max="22" value="14" id="f6-fs" oninput="document.getElementById('f6-fs-v').textContent=this.value;rF6()"/></div>
+        <div><label>Panel A — Width (px) <span class="cv" id="f6-wa-v">400</span></label><input type="range" min="200" max="900" value="400" step="25" id="f6-wa" oninput="document.getElementById('f6-wa-v').textContent=this.value;rSz('f6-tcw',this.value)"/></div>
+        <div><label>Panel B — Width (px) <span class="cv" id="f6-wb-v">400</span></label><input type="range" min="200" max="900" value="400" step="25" id="f6-wb" oninput="document.getElementById('f6-wb-v').textContent=this.value;rSz('f6-yrw',this.value)"/></div>
+        <div><label>Panel C — Width (px) <span class="cv" id="f6-wc-v">400</span></label><input type="range" min="200" max="900" value="400" step="25" id="f6-wc" oninput="document.getElementById('f6-wc-v').textContent=this.value;rSz('f6-nmw',this.value)"/></div>
+        <div><label>Panel A — Color Palette</label>
+          <select id="f6-pa-pal" onchange="APP.settings.palF6A=this.value;if(APP.data)rF6()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+        <div><label>Panel B — Color Palette</label>
+          <select id="f6-pb-pal" onchange="APP.settings.palF6B=this.value;if(APP.data)rF6()"><option value="blue">Blue</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm" selected>Warm (orange)</option></select></div>
+        <div><label>Panel C — Color Palette</label>
+          <select id="f6-pc-pal" onchange="APP.settings.palF6C=this.value;if(APP.data)rF6()"><option value="blue">Blue</option><option value="teal" selected>Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+      </div>
+    </div>
+    <div class="fc">
+      <div class="fch"><div><div class="fct">Most Global Cited Documents</div><div class="fcs">Top documents across three citation metrics</div></div>
+        <div class="er">
+          <button class="eb" onclick="xc('f6-tc','Fig6_TotalCitations')"><span class="mi" style="font-size:13px">download</span>PNG TC</button>
+          <button class="eb" onclick="xSVGChart('f6-tc','Fig6_TotalCitations')"><span class="mi" style="font-size:13px">download</span>SVG TC</button>
+          <button class="eb" onclick="xc('f6-yr','Fig6_TCperYear')"><span class="mi" style="font-size:13px">download</span>PNG TC/yr</button>
+          <button class="eb" onclick="xSVGChart('f6-yr','Fig6_TCperYear')"><span class="mi" style="font-size:13px">download</span>SVG TC/yr</button>
+          <button class="eb" onclick="xc('f6-nm','Fig6_NormTC')"><span class="mi" style="font-size:13px">download</span>PNG Norm</button>
+          <button class="eb" onclick="xSVGChart('f6-nm','Fig6_NormTC')"><span class="mi" style="font-size:13px">download</span>SVG Norm</button>
+          <button class="eb grp" onclick="xMerge(['f6-tc','f6-yr','f6-nm'],'Fig6_CitedDocs_Combined',true)"><span class="mi" style="font-size:13px">merge</span>Combined PNG</button>
+          <button class="eb grp" onclick="xMergeSVG(['f6-tc','f6-yr','f6-nm'],'Fig6_CitedDocs_Combined',true)"><span class="mi" style="font-size:13px">merge</span>Combined SVG</button>
+        </div></div>
+      <div class="thc">
+        <div><div class="clb">Total Citations</div><div style="position:relative" id="f6-tcw"><canvas id="f6-tc" aria-label="Total citations">Total citations.</canvas></div></div>
+        <div><div class="clb">TC per Year</div><div style="position:relative" id="f6-yrw"><canvas id="f6-yr" aria-label="TC per year">TC per year.</canvas></div></div>
+        <div><div class="clb">Normalized TC</div><div style="position:relative" id="f6-nmw"><canvas id="f6-nm" aria-label="Normalized TC">Normalized TC.</canvas></div></div>
+      </div>
+      <div class="thc" style="margin-top:.55rem">
+        <div class="lgr"><div class="lgb" id="lg6a" style="background:linear-gradient(to right,#c6dbef,#084594)"></div><span>Color: Total Citations (low → high)</span></div>
+        <div class="lgr"><div class="lgb" id="lg6b" style="background:linear-gradient(to right,#ffe0b2,#bf360c)"></div><span>Color: TC per Year (low → high)</span></div>
+        <div class="lgr"><div class="lgb" id="lg6c" style="background:linear-gradient(to right,#c8e6c9,#1b5e20)"></div><span>Color: Normalized TC (low → high)</span></div>
+      </div>
+      <details><summary><span class="mi" style="font-size:14px">info</span> Scientific Description</summary>
+        <div class="dp"><strong>Left — Total Citations:</strong> Absolute citation count. Blue sequential gradient. The leading document represents a foundational work in the field.<br><br><strong>Center — TC per Year:</strong> Citations ÷ years since publication = citation rate. Orange gradient. Recent documents with high TC/yr indicate current high momentum.<br><br><strong>Right — Normalized TC:</strong> TC/yr ÷ field average for that year, enabling fair cross-temporal comparison. Green gradient. Essential for equitably benchmarking older vs. newer works.</div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ══ PRISMA FLOW DIAGRAM ══ -->
+  <div id="page-prisma" class="pg">
+    <div class="ph"><div class="bc">Tools / <span>PRISMA Flow Diagram</span></div><h1 class="pt">PRISMA Flow Diagram</h1><p class="ps">Preferred Reporting Items for Systematic Reviews and Meta-Analyses · Bibliometric edition</p></div>
+
+    <!-- ① Identification: multiple databases -->
+    <div class="cp">
+      <h4 style="display:flex;align-items:center;gap:.4rem;margin-bottom:.7rem"><span class="mi" style="font-size:17px">manage_search</span> Identification — Databases
+        <button class="bs" onclick="prAddDB()" style="margin-left:auto;font-size:.68rem;padding:.28rem .7rem"><span class="mi" style="font-size:13px">add</span>Add Database</button>
+      </h4>
+      <div id="pr-dbs" style="display:flex;flex-direction:column;gap:.5rem"></div>
+      <div style="margin-top:.7rem;display:grid;grid-template-columns:1fr 1fr;gap:.7rem">
+        <div>
+          <label style="font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--onsv);display:block;margin-bottom:.3rem">Other sources (optional description)</label>
+          <input type="text" id="pr-other-src" placeholder="e.g. DOI list, manual search" style="width:100%;padding:.35rem .55rem;border:1px solid var(--ol);border-radius:.32rem;background:var(--sf-lo);font-size:.75rem;color:var(--ons)"/>
+        </div>
+        <div>
+          <label style="font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--onsv);display:block;margin-bottom:.3rem">Records from other sources</label>
+          <input type="number" id="pr-other-n" min="0" value="0" style="width:100%;padding:.35rem .55rem;border:1px solid var(--ol);border-radius:.32rem;background:var(--sf-lo);font-size:.75rem;color:var(--ons)"/>
+        </div>
+      </div>
+      <div style="margin-top:.55rem;background:var(--sf-lo);border:1px solid var(--ol);border-radius:.38rem;padding:.5rem .8rem;font-size:.75rem;display:flex;gap:2rem;flex-wrap:wrap">
+        <span>Total identified: <strong id="pr-total-lbl">0</strong></span>
+      </div>
+    </div>
+
+    <!-- ② Deduplication -->
+    <div class="cp">
+      <h4 style="margin-bottom:.7rem"><span class="mi" style="font-size:17px">content_copy</span> Deduplication</h4>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.7rem;align-items:end">
+        <div>
+          <label style="font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--onsv);display:block;margin-bottom:.3rem">Duplicates Removed</label>
+          <input type="number" id="pr-dupl" min="0" value="0" oninput="prUpdateTotals()" style="width:100%;padding:.38rem .55rem;border:1px solid var(--ol);border-radius:.32rem;background:var(--sf-lo);font-size:.8rem;color:var(--ons)"/>
+        </div>
+        <div style="background:var(--sf-lo);border:1px solid var(--ol);border-radius:.38rem;padding:.45rem .7rem">
+          <div style="font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--onsv)">Records after deduplication</div>
+          <div style="font-size:1.1rem;font-weight:800;color:var(--pr);font-family:'Manrope',sans-serif;margin-top:2px" id="pr-after-dupl">—</div>
+        </div>
+        <div style="font-size:.7rem;color:var(--onsv);line-height:1.5">= Total identified − Duplicates removed</div>
+      </div>
+    </div>
+
+    <!-- ③ Filter Criteria (Screening + Eligibility) -->
+    <div class="cp">
+      <h4 style="display:flex;align-items:center;gap:.4rem;margin-bottom:.7rem"><span class="mi" style="font-size:17px">filter_alt</span> Filter Criteria
+        <button class="bs" onclick="prAddStep()" style="margin-left:auto;font-size:.68rem;padding:.28rem .7rem"><span class="mi" style="font-size:13px">add</span>Add Filter Criterion</button>
+      </h4>
+      <div style="display:grid;grid-template-columns:2fr 1fr 80px auto;gap:.4rem;padding:.25rem .65rem;font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--onsv)">
+        <span>Filter Criterion / Description</span><span>Phase</span><span>N remaining</span><span></span>
+      </div>
+      <div id="pr-steps" style="display:flex;flex-direction:column;gap:.38rem"></div>
+      <div style="font-size:.67rem;color:var(--onsv);margin-top:.55rem;background:var(--sf-lo);border-radius:.32rem;padding:.4rem .7rem;line-height:1.55">
+        <strong>Screening:</strong> duplicate removal, time span, document type &nbsp;|&nbsp; <strong>Eligibility:</strong> subject, language, journal, country &nbsp;|&nbsp; Excluded counts calculated automatically.
+      </div>
+    </div>
+
+    <!-- ④ Final Dataset -->
+    <div class="cp">
+      <h4 style="margin-bottom:.7rem"><span class="mi" style="font-size:17px">check_circle</span> Inclusion</h4>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem;align-items:end">
+        <div style="background:var(--sf-lo);border:1px solid var(--ol);border-radius:.38rem;padding:.5rem .8rem">
+          <div style="font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--onsv)">Final Dataset (auto from last step)</div>
+          <div style="font-size:1.1rem;font-weight:800;color:#1b5e20;font-family:'Manrope',sans-serif;margin-top:2px" id="pr-final-lbl">—</div>
+        </div>
+        <div style="font-size:.72rem;color:var(--onsv);line-height:1.55">
+          The final count is taken automatically from the last filter step's N remaining. If no steps are added, it equals records after deduplication.
+        </div>
+      </div>
+    </div>
+
+    <!-- ⑤ Generate + download -->
+    <div class="cp" style="margin-bottom:.8rem">
+      <h4 style="margin-bottom:.7rem"><span class="mi" style="font-size:17px">palette</span> Diagram Style</h4>
+      <div class="cg">
+        <div><label>Color Palette</label>
+          <select id="pr-pal" onchange="APP.settings.palPR=this.value;if(APP._prismaSVG)genPRISMA()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:.7rem;align-items:center;margin-bottom:1.1rem;flex-wrap:wrap">
+      <button class="bp" onclick="genPRISMA()"><span class="mi" style="font-size:16px">account_tree</span> Generate PRISMA Diagram</button>
+      <button class="bs" id="pr-dl-btn" style="display:none" onclick="dlPRISMA('png')"><span class="mi" style="font-size:14px">download</span> PNG</button>
+      <button class="bs" id="pr-dl-svg-btn" style="display:none" onclick="dlPRISMA('svg')"><span class="mi" style="font-size:14px">download</span> SVG</button>
+      <div style="font-size:.72rem;color:var(--onsv)" id="pr-msg"></div>
+    </div>
+
+    <div id="pr-out" style="background:var(--sf-wh);border:1px solid var(--ol);border-radius:.85rem;padding:1.25rem;min-height:120px;overflow-x:auto"></div>
+  </div>
+
+  <!-- ══ SETTINGS ══ -->
+
+    <!-- ══ SETTINGS ══ -->
+  <div id="page-settings" class="pg">
+    <div class="ph"><div class="bc">Settings / <span>Thresholds &amp; Export</span></div><h1 class="pt">Thresholds &amp; Export</h1><p class="ps">Globally adjust visualization and export parameters</p></div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">tune</span> Thresholds by Figure</h4>
+      <div class="cg">
+        <div><label>Top N — Authors (Fig 1 &amp; 2) <span class="cv" id="gs-v-au">20</span></label><input type="range" min="5" max="50" value="20" id="gs-s-au" oninput="uslG('au')"/></div>
+        <div><label>Top N — Institutions (Fig 3) <span class="cv" id="gs-v-in">20</span></label><input type="range" min="5" max="50" value="20" id="gs-s-in" oninput="uslG('in')"/></div>
+        <div><label>Top N — Journals (Fig 4) <span class="cv" id="gs-v-jo">20</span></label><input type="range" min="5" max="50" value="20" id="gs-s-jo" oninput="uslG('jo')"/></div>
+        <div><label>Top N — Cited Docs (Fig 6) <span class="cv" id="gs-v-dc">20</span></label><input type="range" min="5" max="50" value="20" id="gs-s-dc" oninput="uslG('dc')"/></div>
+        <div><label>Min. Edges — World Map <span class="cv" id="gs-v-mc">2</span></label><input type="range" min="1" max="20" value="2" id="gs-s-mc" oninput="uslG('mc')"/></div>
+      </div>
+    </div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">text_fields</span> Typography</h4>
+      <div class="cg"><div><label>Base Font Size <span class="cv" id="gs-v-fs">14</span> px</label><input type="range" min="10" max="22" value="14" id="gs-s-fs" oninput="ufsG()"/></div></div>
+    </div>
+    <div class="cp"><h4><span class="mi" style="font-size:17px">save</span> Export</h4>
+      <div class="cg">
+        <div><label>Resolution (DPI)</label>
+          <select id="gs-s-dpi" onchange="document.getElementById('s-dpi').value=this.value">
+            <option value="1">96 dpi (screen)</option><option value="2">150 dpi</option><option value="3" selected>300 dpi (publication)</option><option value="4">450 dpi</option><option value="5">600 dpi</option><option value="6">1200 dpi</option>
+          </select></div>
+        <div><label>Format</label><select id="gs-s-fmt" onchange="document.getElementById('s-fmt').value=this.value"><option value="png">PNG</option><option value="jpeg">JPEG</option></select></div>
+        <div><label>Color Palette</label><select id="gs-s-pal" onchange="document.getElementById('s-pal').value=this.value;uppal()"><option value="blue">Blue (default)</option><option value="teal">Teal / Green</option><option value="purple">Purple</option><option value="warm">Warm (orange)</option></select></div>
+      </div>
+    </div>
+    <button class="bp" onclick="genAll()"><span class="mi" style="font-size:16px">auto_graph</span> Regenerate All Figures</button>
+  </div>
+</main>
+
+<script src="js/app.js"></script>
+</body>
+</html>
