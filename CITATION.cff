@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "Se você usar este software, cite-o conforme abaixo."
+title: "BiblioCharts: Bibliometric Figure Generator"
+abstract: "Aplicação web para análise bibliométrica: ingestão e deduplicação de exportações de Web of Science, Scopus, Dimensions, OpenAlex, Lens.org, PubMed e Cochrane, geração de figuras para publicação Q1 e diagrama PRISMA."
+type: software
+authors:
+  - family-names: Vasconcelos
+    given-names: Rodrigo
+version: 1.0.0
+date-released: 2026-11-17
+license: GPL-3.0-or-later
+repository-code: "https://github.com/rnvuefsppgm/BiblioCharts"
+keywords:
+  - bibliometrics
+  - bibliometrix
+  - scientometrics
+  - systematic review
+  - PRISMA
+  - data visualization

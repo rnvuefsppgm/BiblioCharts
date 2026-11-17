@@ -1,9 +1,23 @@
 <!DOCTYPE html>
+<!--
+BiblioCharts v1.0.0 — Bibliometric Figure Generator
+Copyright (C) 2026 Rodrigo Vasconcelos
+https://github.com/rnvuefsppgm/BiblioCharts
+
+This program is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either version 3
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details: <https://www.gnu.org/licenses/>.
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Bibliometric Figure Generator · Q1</title>
+<title>BiblioCharts · Bibliometric Figure Generator</title>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
@@ -18,7 +32,7 @@
 
 <!-- ═══ SIDEBAR ═══ -->
 <aside>
-  <div class="sb-brand"><h2>Bibliometric Engine</h2><p>Figure Generator · Q1 Level</p></div>
+  <div class="sb-brand"><h2>BiblioCharts</h2><p>Bibliometric Figure Generator · Q1 Level</p></div>
   <nav>
     <div class="nl">Data</div>
     <div class="ni active" onclick="sp('ingest',this)" id="nav-ingest"><span class="mi">upload_file</span> Data Ingestion</div>
@@ -35,13 +49,19 @@
     <div class="nl">Settings</div>
     <div class="ni dis" onclick="sp('settings',this)" id="nav-settings"><span class="mi">tune</span> Thresholds &amp; Export</div>
   </nav>
+  <div class="sb-foot">
+    <b>BiblioCharts</b> v1.0.0<br/>
+    &copy; 2026 Rodrigo Vasconcelos<br/>
+    <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">GPL-3.0</a> &middot;
+    <a href="https://github.com/rnvuefsppgm/BiblioCharts" target="_blank" rel="noopener">GitHub</a>
+  </div>
 </aside>
 
 <!-- ═══ MAIN ═══ -->
 <main>
   <header>
     <div style="display:flex;align-items:center;gap:.7rem">
-      <span class="htl">Bibliometric Figure Generator</span>
+      <span class="htl">BiblioCharts</span>
       <span class="hbg">Q1 Level</span>
     </div>
     <button class="bs" id="btn-gen" disabled onclick="genAll()"><span class="mi" style="font-size:15px">auto_graph</span> Generate Figures</button>

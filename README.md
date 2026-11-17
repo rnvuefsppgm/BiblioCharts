@@ -2,6 +2,8 @@
 
 **Bibliometric Figure Generator**
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) ![Version](https://img.shields.io/badge/version-1.0.0-teal.svg)
+
 
 Aplicação web para **análise bibliométrica e geração de figuras em nível de publicação Q1**. Ela recebe as exportações das principais bases científicas, une e deduplica os registros, e gera automaticamente gráficos prontos para artigos, além do diagrama PRISMA.
 
@@ -20,7 +22,8 @@ Tudo roda **no navegador, sem instalação e sem servidor**. Nenhum dado sai do 
 7. [Como funciona a deduplicação](#como-funciona-a-deduplicação)
 8. [Estrutura do repositório](#estrutura-do-repositório)
 9. [Dicas e solução de problemas](#dicas-e-solução-de-problemas)
-10. [Licença](#licença)
+10. [Como citar](#como-citar)
+11. [Licença](#licença)
 
 ---
 
@@ -195,7 +198,8 @@ BiblioCharts/
 │   ├── css/styles.css      # estilos
 │   └── js/app.js           # leitura das bases, deduplicação, métricas, figuras e exportação
 ├── README.md               # este tutorial
-└── LICENSE                 # licença CC0 1.0 Universal
+├── CITATION.cff            # dados para citar o software
+└── LICENSE                 # licença GPL-3.0
 ```
 
 Bibliotecas usadas, carregadas por CDN: [Chart.js](https://www.chartjs.org/), [D3](https://d3js.org/), [TopoJSON](https://github.com/topojson/topojson) e [SheetJS](https://sheetjs.com/).
@@ -212,6 +216,24 @@ Bibliotecas usadas, carregadas por CDN: [Chart.js](https://www.chartjs.org/), [D
 
 ---
 
+## Como citar
+
+Se o BiblioCharts ajudou na sua pesquisa, cite o software. Use o botão **Cite this repository** no topo desta página, que gera a referência em APA e BibTeX a partir do arquivo [`CITATION.cff`](CITATION.cff).
+
+```
+Vasconcelos, R. (2026). BiblioCharts: Bibliometric Figure Generator (Versão 1.0.0) [Software]. https://github.com/rnvuefsppgm/BiblioCharts
+```
+
+---
+
 ## Licença
 
-Distribuído sob a licença [CC0 1.0 Universal](LICENSE).
+Copyright © 2026 Rodrigo Vasconcelos.
+
+O BiblioCharts é software livre, distribuído sob a **GNU General Public License v3.0 ou posterior** ([GPL-3.0-or-later](LICENSE)). Em resumo:
+
+- Você pode usar, estudar, copiar, modificar e distribuir o programa, inclusive para fins comerciais.
+- Quem distribuir o programa ou uma versão modificada deve manter o aviso de copyright, disponibilizar o código-fonte e usar a mesma licença GPL-3.0.
+- O programa é fornecido sem garantia de qualquer tipo.
+
+As bibliotecas carregadas por CDN mantêm suas próprias licenças: Chart.js (MIT), D3 e TopoJSON (ISC) e SheetJS (Apache 2.0).
