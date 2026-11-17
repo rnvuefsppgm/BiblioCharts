@@ -194,7 +194,8 @@ BiblioCharts/
 │   ├── index.html          # estrutura das páginas
 │   ├── css/styles.css      # estilos
 │   └── js/app.js           # leitura das bases, deduplicação, métricas, figuras e exportação
-└── README.md               # este tutorial
+├── README.md               # este tutorial
+└── LICENSE                 # licença CC0 1.0 Universal
 ```
 
 Bibliotecas usadas, carregadas por CDN: [Chart.js](https://www.chartjs.org/), [D3](https://d3js.org/), [TopoJSON](https://github.com/topojson/topojson) e [SheetJS](https://sheetjs.com/).
